@@ -1,10 +1,16 @@
-# userver <img src="./scripts/docs/logo.svg" align='right' width="30%">
+# userver [<img src="./scripts/docs/logo.svg" align='right' width="10%">](https://userver.tech/)
+
+| Service Templates | Status |
+|------------------------|-----|
+| [Core](https://github.com/userver-framework/service_template) | [![CI](https://github.com/userver-framework/service_template/actions/workflows/ci.yml/badge.svg)](https://github.com/userver-framework/service_template/actions/workflows/ci.yml) [![Docker build](https://github.com/userver-framework/service_template/actions/workflows/docker.yaml/badge.svg)](https://github.com/userver-framework/service_template/actions/workflows/docker.yaml) |
+| [PostgreSQL](https://github.com/userver-framework/pg_service_template) | [![CI](https://github.com/userver-framework/pg_service_template/actions/workflows/ci.yml/badge.svg)](https://github.com/userver-framework/pg_service_template/actions/workflows/ci.yml) [![Docker build](https://github.com/userver-framework/pg_service_template/actions/workflows/docker.yaml/badge.svg)](https://github.com/userver-framework/pg_service_template/actions/workflows/docker.yaml) |
+| [gRPC+PostgreSQL](https://github.com/userver-framework/pg_grpc_service_template) | [![CI](https://github.com/userver-framework/pg_grpc_service_template/actions/workflows/ci.yml/badge.svg)](https://github.com/userver-framework/pg_grpc_service_template/actions/workflows/ci.yml) [![Docker build](https://github.com/userver-framework/pg_grpc_service_template/actions/workflows/docker.yaml/badge.svg)](https://github.com/userver-framework/pg_grpc_service_template/actions/workflows/docker.yaml) |
 
 **userver** is an open source asynchronous framework with a rich set of abstractions
 for fast and comfortable creation of C++ microservices, services and utilities.
 
 The framework solves the problem of efficient I/O interactions transparently for
-the developers. Operations that would typically suspend the thread of
+the developers. Operations that would typically suspend the thread of 
 execution do not suspend it. Instead of that, the thread processes other
 requests and tasks and returns to the handling of the operation only when it is
 guaranteed to execute immediately: 
@@ -29,8 +35,9 @@ or [Habr](https://habr.com/post/674902) (Russian).
 
 ## Other Features
 
-* Efficient asynchronous drivers for databases (MongoDB, PostgreSQL, Redis, ClickHouse, ...)
-  and data transfer protocols (HTTP, GRPC, AMQP 0-9-1 (EXPERIMENTAL), TCP, ...), tasks construction and
+* Efficient asynchronous drivers for databases (MongoDB, PostgreSQL, Redis,
+  ClickHouse, MySQL/MariaDB (experimental) ...) and data transfer protocols
+  (HTTP, GRPC, AMQP 0-9-1 (experimental), TCP, TLS ...), tasks construction and
   cancellation.
 * Rich set of high-level components for caches, tasks, distributed locking,
   logging, tracing, statistics, metrics, JSON/YAML/BSON.

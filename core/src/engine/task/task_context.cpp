@@ -9,11 +9,13 @@
 #include <engine/coro/pool.hpp>
 #include <logging/log_extra_stacktrace.hpp>
 #include <userver/engine/exception.hpp>
+#include <userver/engine/impl/task_context_factory.hpp>
 #include <userver/engine/task/cancel.hpp>
 #include <userver/logging/stacktrace_cache.hpp>
 #include <userver/utils/assert.hpp>
 #include <userver/utils/underlying_value.hpp>
 
+#include <compiler/tls.hpp>
 #include <engine/ev/thread_pool.hpp>
 #include <engine/impl/generic_wait_list.hpp>
 #include <engine/task/coro_unwinder.hpp>
@@ -37,6 +39,7 @@ void SetCurrentTaskContext(impl::TaskContext* context) {
 
 }  // namespace
 
+USERVER_PREVENT_TLS_CACHING
 impl::TaskContext& GetCurrentTaskContext() noexcept {
   if (!current_task_context_ptr) {
     // AbortWithStacktrace MUST be a separate function! Putting the body of this
@@ -51,6 +54,7 @@ impl::TaskContext& GetCurrentTaskContext() noexcept {
   return *current_task_context_ptr;
 }
 
+USERVER_PREVENT_TLS_CACHING
 impl::TaskContext* GetCurrentTaskContextUnchecked() noexcept {
   return current_task_context_ptr;
 }
@@ -98,20 +102,15 @@ auto* const kFinishedDetachedToken =
 
 TaskContext::TaskContext(TaskProcessor& task_processor,
                          Task::Importance importance, Task::WaitMode wait_type,
-                         Deadline deadline, TaskPayload&& payload)
-    : magic_(kMagic),
-      task_processor_(task_processor),
+                         Deadline deadline,
+                         utils::impl::WrappedCallBase& payload)
+    : task_processor_(task_processor),
       task_counter_token_(task_processor_.GetTaskCounter()),
       is_critical_(importance == Task::Importance::kCritical),
-      payload_(std::move(payload)),
-      state_(Task::State::kNew),
-      detached_token_(nullptr),
-      cancellation_reason_(TaskCancellationReason::kNone),
+      payload_(&payload),
       finish_waiters_(wait_type),
       cancel_deadline_(deadline),
-      trace_csw_left_(task_processor_.GetTaskTraceMaxCswForNewTask()),
-      sleep_state_(SleepState{SleepFlags::kSleeping, SleepState::Epoch{0}}),
-      local_storage_(std::nullopt) {
+      trace_csw_left_(task_processor_.GetTaskTraceMaxCswForNewTask()) {
   UASSERT(payload_);
   LOG_TRACE() << "task with task_id="
               << ReadableTaskId(current_task::GetCurrentTaskContextUnchecked())
@@ -127,6 +126,8 @@ TaskContext::~TaskContext() noexcept {
   UASSERT(state_ == Task::State::kNew || IsFinished());
   UASSERT(detached_token_ == nullptr ||
           detached_token_ == kFinishedDetachedToken);
+
+  UASSERT(payload_ == nullptr);
 }
 
 utils::impl::WrappedCallBase& TaskContext::GetPayload() noexcept {
@@ -199,10 +200,6 @@ void TaskContext::WaitUntil(Deadline deadline) const {
   auto& current = current_task::GetCurrentTaskContext();
   if (&current == this) ReportDeadlock();
 
-  if (current.ShouldCancel()) {
-    throw WaitInterruptedException(current.cancellation_reason_);
-  }
-
   LockedWaitStrategy wait_manager(deadline, *finish_waiters_, current, *this);
   current.Sleep(wait_manager);
 
@@ -237,18 +234,20 @@ void TaskContext::DoStep() {
 
   switch (yield_reason_) {
     case YieldReason::kTaskCancelled:
-    case YieldReason::kTaskComplete:
+    case YieldReason::kTaskComplete: {
       std::move(coro_).ReturnToPool();
-      {
-        auto new_state = (yield_reason_ == YieldReason::kTaskComplete)
-                             ? Task::State::kCompleted
-                             : Task::State::kCancelled;
-        SetState(new_state);
-        deadline_timer_.Finalize();
-        finish_waiters_->WakeupAll();
-        TraceStateTransition(new_state);
+      auto new_state = (yield_reason_ == YieldReason::kTaskComplete)
+                           ? Task::State::kCompleted
+                           : Task::State::kCancelled;
+      if (cancellation_reason_.load(std::memory_order_relaxed) !=
+          TaskCancellationReason::kNone) {
+        GetTaskProcessor().GetTaskCounter().AccountTaskCancel();
       }
-      break;
+      SetState(new_state);
+      deadline_timer_.Finalize();
+      finish_waiters_->WakeupAll();
+      TraceStateTransition(new_state);
+    } break;
 
     case YieldReason::kTaskWaiting:
       SetState(Task::State::kSuspended);
@@ -287,7 +286,6 @@ void TaskContext::RequestCancel(TaskCancellationReason reason) {
                 << logging::LogExtra::Stacktrace();
     const auto epoch = GetEpoch();
     Wakeup(WakeupSource::kCancelRequest, epoch);
-    task_processor_.GetTaskCounter().AccountTaskCancel();
   }
 }
 
@@ -310,6 +308,10 @@ TaskContext::WakeupSource TaskContext::Sleep(WaitStrategy& wait_strategy) {
     UASSERT_MSG(std::exchange(within_sleep_, false),
                 "within_sleep_ should report being in Sleep");
   }};
+
+  // If the previous Sleep woke up due to both kCancelRequest and kWaitList, the
+  // cancellation signal would be lost, so we must check it here.
+  if (ShouldCancel()) return TaskContext::WakeupSource::kCancelRequest;
 
   wait_strategy.SetupWakeups();
 
@@ -446,7 +448,7 @@ void TaskContext::Wakeup(WakeupSource source, SleepState::Epoch epoch) {
   }
 }
 
-void TaskContext::Wakeup(WakeupSource source, TaskContext::NoEpoch) {
+void TaskContext::Wakeup(WakeupSource source, NoEpoch) {
   UASSERT(source != WakeupSource::kDeadlineTimer);
   UASSERT(source != WakeupSource::kBootstrap);
   UASSERT(source != WakeupSource::kCancelRequest);
@@ -465,9 +467,12 @@ void TaskContext::Wakeup(WakeupSource source, TaskContext::NoEpoch) {
   }
 }
 
-TaskContext::WakeupSource TaskContext::DebugGetWakeupSource() const {
+void TaskContext::WakeupCurrent() {
   UASSERT(IsCurrent());
-  return wakeup_source_;
+  UASSERT(GetState() == Task::State::kRunning);
+
+  sleep_state_.FetchOrFlags<std::memory_order_seq_cst>(
+      static_cast<SleepFlags>(WakeupSource::kWaitList));
 }
 
 class TaskContext::LocalStorageGuard {
@@ -498,7 +503,7 @@ void TaskContext::CoroFunc(TaskPipe& task_pipe) {
       // to synchronize in its dtor (e.g. lambda closure).
       {
         LocalStorageGuard local_storage_guard(*context);
-        context->payload_.reset();
+        context->ResetPayload();
       }
       context->yield_reason_ = YieldReason::kTaskCancelled;
     } else {
@@ -562,6 +567,20 @@ void TaskContext::RethrowErrorResult() const {
     throw TaskCancelledException(CancellationReason());
   }
   payload_->RethrowErrorResult();
+}
+
+size_t TaskContext::UseCount() const noexcept {
+  // memory order could potentially be less restrictive, but it gets very
+  // complicated to reason about
+  return intrusive_refcount_.load(std::memory_order_seq_cst);
+}
+
+std::size_t TaskContext::DecrementFetchSharedTaskUsages() noexcept {
+  return --shared_task_usages_;
+}
+
+std::size_t TaskContext::IncrementFetchSharedTaskUsages() noexcept {
+  return ++shared_task_usages_;
 }
 
 TaskContext::WakeupSource TaskContext::GetPrimaryWakeupSource(
@@ -674,8 +693,6 @@ void TaskContext::ProfilerStopExecution() {
   auto duration_us =
       std::chrono::duration_cast<std::chrono::microseconds>(duration);
 
-  task_processor_.GetTaskCounter().AccountTaskExecution(duration_us);
-
   if (duration_us >= threshold_us) {
     logging::LogExtra extra_stacktrace;
     if (task_processor_.ShouldProfilerForceStacktrace()) {
@@ -701,10 +718,61 @@ void TaskContext::TraceStateTransition(Task::State state) {
   last_state_change_timepoint_ = now;
 
   auto logger = task_processor_.GetTaskTraceLogger();
-  LOG_INFO_TO(logger) << "Task " << logging::HexShort(GetTaskId())
-                      << " changed state to " << Task::GetStateName(state)
-                      << ", delay = " << diff_us << "us"
-                      << logging::LogExtra::Stacktrace(logger);
+  if (!logger) {
+    return;
+  }
+
+  LOG_INFO_TO(*logger) << "Task " << logging::HexShort(GetTaskId())
+                       << " changed state to " << Task::GetStateName(state)
+                       << ", delay = " << diff_us << "us"
+                       << logging::LogExtra::Stacktrace(*logger);
+}
+
+void TaskContext::ResetPayload() noexcept {
+  if (!payload_) return;
+
+  std::destroy_at(std::exchange(payload_, nullptr));
+}
+
+void intrusive_ptr_add_ref(TaskContext* p) noexcept {
+  UASSERT(p);
+
+  // memory order could potentially be less restrictive, but it gets very
+  // complicated to reason about
+  p->intrusive_refcount_.fetch_add(1, std::memory_order_seq_cst);
+}
+
+void intrusive_ptr_release(TaskContext* p) noexcept {
+  UASSERT(p);
+
+  // memory order could potentially be less restrictive, but it gets very
+  // complicated to reason about
+  if (p->intrusive_refcount_.fetch_sub(1, std::memory_order_seq_cst) == 1) {
+    p->ResetPayload();
+
+    std::destroy_at(p);
+
+    DeleteFusedTaskContext(reinterpret_cast<std::byte*>(p));
+  }
+}
+
+bool HasWaitSucceeded(TaskContext::WakeupSource wakeup_source) noexcept {
+  // Typical synchronization primitives sleep in a WaitList until woken up
+  // (which is counted as a success), or they can sometimes wake themselves up
+  // using kWaitList.
+  switch (wakeup_source) {
+    case TaskContext::WakeupSource::kWaitList:
+      return true;
+    case TaskContext::WakeupSource::kDeadlineTimer:
+    case TaskContext::WakeupSource::kCancelRequest:
+      return false;
+    case TaskContext::WakeupSource::kNone:
+    case TaskContext::WakeupSource::kBootstrap:
+      UASSERT(false);
+  }
+
+  // Assume that bugs with an unexpected WakeupSource don't reach production.
+  return false;
 }
 
 }  // namespace impl

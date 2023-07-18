@@ -3,6 +3,7 @@
 #include <fmt/compile.h>
 #include <fmt/format.h>
 
+#include <userver/logging/impl/tag_writer.hpp>
 #include <userver/utils/algo.hpp>
 
 USERVER_NAMESPACE_BEGIN
@@ -24,10 +25,10 @@ TimeStorage::Duration TimeStorage::DurationTotal(const std::string& key) const {
   return utils::FindOrDefault(data_, key, Duration{0});
 }
 
-void TimeStorage::MergeInto(logging::LogExtra& result) {
+void TimeStorage::MergeInto(logging::impl::TagWriter writer) {
   for (const auto& [key, value] : data_) {
     const auto ns_count = value.count();
-    result.Extend(key + kTimerSuffix,
+    writer.PutTag(logging::impl::RuntimeTagKey{key + kTimerSuffix},
                   fmt::format(FMT_COMPILE("{}.{:0>6}"), ns_count / kNsInMs,
                               ns_count % kNsInMs));
   }

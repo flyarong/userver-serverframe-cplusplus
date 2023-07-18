@@ -40,6 +40,7 @@
 #include <string.h>
 
 #include <libpq-int.h>
+#include <pg_config.h>
 
 /*
  * This is copy-paste from fe-protocol3.c
@@ -828,7 +829,11 @@ PGresult* PQXgetResult(PGconn* conn) {
             libpq_gettext(
                 "PGEventProc \"%s\" failed during PGEVT_RESULTCREATE event\n"),
             res->events[i].name);
-#if PG_VERSION_NUM >= 140000
+#if PG_VERSION_NUM >= 150000
+        // We might use `conn->errorReported` instead of a 0
+        // to negate a rare possibility of messages duplication
+        pqSetResultError(res, &conn->errorMessage, 0);
+#elif PG_VERSION_NUM >= 140000
         pqSetResultError(res, &conn->errorMessage);
 #else
         pqSetResultError(res, conn->errorMessage.data);
@@ -926,9 +931,16 @@ static int getNotify(PGconn* conn) {
   newNotify = (PGnotify*)malloc(sizeof(PGnotify) + nmlen + extralen + 2);
   if (newNotify) {
     newNotify->relname = (char*)newNotify + sizeof(PGnotify);
-    strncpy(newNotify->relname, svname, nmlen + 1);
+    memcpy(newNotify->relname, svname, nmlen);
+
+    /* No zero termination, `extra` goes right after the last non-zero char of
+     * `relname`
+     */
+
     newNotify->extra = newNotify->relname + nmlen + 1;
-    strncpy(newNotify->extra, conn->workBuffer.data, extralen + 1);
+    memcpy(newNotify->extra, conn->workBuffer.data, extralen);
+    newNotify->extra[extralen + 1] = '\0';
+
     newNotify->be_pid = be_pid;
     newNotify->next = NULL;
     if (conn->notifyTail)

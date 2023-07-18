@@ -10,11 +10,14 @@
 #include <userver/logging/log_extra.hpp>
 #include <userver/tracing/scope_time.hpp>
 #include <userver/tracing/tracer_fwd.hpp>
+#include <userver/utils/impl/source_location.hpp>
 #include <userver/utils/internal_tag_fwd.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
 namespace tracing {
+
+class SpanBuilder;
 
 /// @brief Measures the execution time of the current code block, links it with
 /// the parent tracing::Spans and stores that info in the log.
@@ -29,13 +32,17 @@ class Span final {
 
   explicit Span(TracerPtr tracer, std::string name, const Span* parent,
                 ReferenceType reference_type,
-                logging::Level log_level = logging::Level::kInfo);
+                logging::Level log_level = logging::Level::kInfo,
+                utils::impl::SourceLocation source_location =
+                    utils::impl::SourceLocation::Current());
 
   /* Use default tracer and implicit coro local storage for parent
    * identification */
   explicit Span(std::string name,
                 ReferenceType reference_type = ReferenceType::kChild,
-                logging::Level log_level = logging::Level::kInfo);
+                logging::Level log_level = logging::Level::kInfo,
+                utils::impl::SourceLocation source_location =
+                    utils::impl::SourceLocation::Current());
 
   /// @cond
   // For internal use only
@@ -62,7 +69,7 @@ class Span final {
   static Span& CurrentSpan();
 
   /// @brief Returns nullptr if called in non-coroutine context or from a task
-  /// with no alive Stan; otherwise returns the Span of the current task.
+  /// with no alive Span; otherwise returns the Span of the current task.
   static Span* CurrentSpanUnchecked();
 
   /// @return A new Span attached to current Span (if any).
@@ -163,8 +170,6 @@ class Span final {
   const std::string& GetSpanId() const;
   const std::string& GetParentId() const;
 
-  void LogTo(logging::LogHelper& log_helper) const&;
-
   /// @returns true if this span would be logged with the current local and
   /// global log levels to the default logger.
   bool ShouldLogDefault() const noexcept;
@@ -177,15 +182,18 @@ class Span final {
   /// by CurrentSpan().
   void AttachToCoroStack();
 
+  std::chrono::system_clock::time_point GetStartSystemTime() const;
+
   /// @cond
   void AddTags(const logging::LogExtra&, utils::InternalTag);
 
   impl::TimeStorage& GetTimeStorage();
+
+  // For internal use only.
+  void LogTo(logging::impl::TagWriter writer) const&;
   /// @endcond
 
  private:
-  std::string GetTag(std::string_view tag) const;
-
   struct OptionalDeleter {
     void operator()(Impl*) const noexcept;
 
@@ -199,10 +207,25 @@ class Span final {
     const bool do_delete;
   };
 
+  friend class SpanBuilder;
+
+  explicit Span(std::unique_ptr<Impl, OptionalDeleter>&& pimpl);
+
+  std::string GetTag(std::string_view tag) const;
+
   std::unique_ptr<Impl, OptionalDeleter> pimpl_;
 };
 
-logging::LogHelper& operator<<(logging::LogHelper& lh, const Span& span);
+namespace impl {
+
+// Must be logged as the last item, after the rest of text.
+struct LogSpanAsLast final {
+  const Span& span;
+};
+
+logging::LogHelper& operator<<(logging::LogHelper& lh, LogSpanAsLast span);
+
+}  // namespace impl
 
 }  // namespace tracing
 

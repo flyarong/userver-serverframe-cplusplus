@@ -1,6 +1,6 @@
 #include <userver/server/handlers/http_handler_base.hpp>
 
-#include <fmt/format.h>
+#include <fmt/core.h>
 #include <boost/algorithm/string/split.hpp>
 
 #include <compression/gzip.hpp>
@@ -8,9 +8,12 @@
 #include <server/handlers/http_server_settings.hpp>
 #include <server/http/http_request_impl.hpp>
 #include <server/server_config.hpp>
+#include <userver/baggage/baggage.hpp>
+#include <userver/baggage/baggage_settings.hpp>
 #include <userver/components/component.hpp>
 #include <userver/components/statistics_storage.hpp>
 #include <userver/dynamic_config/storage/component.hpp>
+#include <userver/engine/deadline.hpp>
 #include <userver/engine/task/cancel.hpp>
 #include <userver/engine/task/inherited_variable.hpp>
 #include <userver/formats/json/serialize.hpp>
@@ -24,18 +27,22 @@
 #include <userver/server/http/http_error.hpp>
 #include <userver/server/http/http_method.hpp>
 #include <userver/server/http/http_response_body_stream.hpp>
+#include <userver/server/http/http_status.hpp>
 #include <userver/server/request/task_inherited_data.hpp>
+#include <userver/tracing/manager_component.hpp>
 #include <userver/tracing/set_throttle_reason.hpp>
-#include <userver/tracing/span.hpp>
+#include <userver/tracing/span_builder.hpp>
 #include <userver/tracing/tags.hpp>
 #include <userver/tracing/tracing.hpp>
+#include <userver/utils/algo.hpp>
+#include <userver/utils/encoding/hex.hpp>
 #include <userver/utils/fast_scope_guard.hpp>
 #include <userver/utils/from_string.hpp>
 #include <userver/utils/graphite.hpp>
+#include <userver/utils/impl/userver_experiments.hpp>
 #include <userver/utils/log.hpp>
 #include <userver/utils/overloaded.hpp>
 #include <userver/utils/scope_guard.hpp>
-#include <userver/utils/statistics/metadata.hpp>
 #include <userver/utils/text.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
 
@@ -83,6 +90,56 @@ void SetFormattedErrorResponse(http::HttpResponse& http_response,
   }
 }
 
+void SetFormattedErrorResponse(
+    server::http::ResponseBodyStream& response_body_stream,
+    FormattedErrorData&& formatted_error, engine::Deadline deadline) {
+  if (formatted_error.content_type) {
+    response_body_stream.SetHeader(
+        USERVER_NAMESPACE::http::headers::kContentType,
+        std::move(formatted_error.content_type->ToString()));
+  }
+  response_body_stream.SetEndOfHeaders();
+  response_body_stream.PushBodyChunk(std::move(formatted_error.external_body),
+                                     deadline);
+}
+
+void SetUpBaggage(const http::HttpRequest& http_request,
+                  const dynamic_config::Snapshot& config_snapshot) {
+  if (config_snapshot[baggage::kBaggageEnabled]) {
+    auto baggage_header =
+        http_request.GetHeader(USERVER_NAMESPACE::http::headers::kXBaggage);
+    if (!baggage_header.empty()) {
+      LOG_DEBUG() << "Got baggage header: " << baggage_header;
+      const auto& baggage_settings = config_snapshot[baggage::kBaggageSettings];
+      auto baggage = baggage::TryMakeBaggage(std::move(baggage_header),
+                                             baggage_settings.allowed_keys);
+      if (baggage) {
+        baggage::kInheritedBaggage.Set(std::move(*baggage));
+      }
+    }
+  }
+}
+
+void LogYandexHeaders(const http::HttpRequest& http_request) {
+  const auto& yandex_request_id =
+      http_request.GetHeader(USERVER_NAMESPACE::http::headers::kXRequestId);
+  const auto& yandex_backend_server =
+      http_request.GetHeader(USERVER_NAMESPACE::http::headers::kXBackendServer);
+  const auto& envoy_proxy = http_request.GetHeader(
+      USERVER_NAMESPACE::http::headers::kXTaxiEnvoyProxyDstVhost);
+
+  if (!yandex_request_id.empty() || !yandex_backend_server.empty() ||
+      !envoy_proxy.empty()) {
+    LOG_INFO() << fmt::format(
+        "Yandex tracing headers {}={}, {}={}, {}={}",
+        USERVER_NAMESPACE::http::headers::kXRequestId, yandex_request_id,
+        USERVER_NAMESPACE::http::headers::kXBackendServer,
+        yandex_backend_server,
+        USERVER_NAMESPACE::http::headers::kXTaxiEnvoyProxyDstVhost,
+        envoy_proxy);
+  }
+}
+
 const std::string kTracingTypeResponse = "response";
 const std::string kTracingTypeRequest = "request";
 const std::string kTracingBody = "body";
@@ -96,21 +153,19 @@ class RequestProcessor final {
   RequestProcessor(const HttpHandlerBase& handler,
                    const http::HttpRequestImpl& http_request_impl,
                    const http::HttpRequest& http_request,
-                   request::RequestContext& context, bool log_request,
-                   bool log_request_headers)
+                   request::RequestContext& context,
+                   dynamic_config::Snapshot&& snapshot)
       : handler_(handler),
         http_request_impl_(http_request_impl),
         http_request_(http_request),
         context_(context),
-        log_request_(log_request),
-        log_request_headers_(log_request_headers) {}
+        config_snapshot_(std::move(snapshot)),
+        settings_(config_snapshot_[kHttpServerSettings]) {}
 
   ~RequestProcessor() {
     try {
       auto& span = tracing::Span::CurrentSpan();
       auto& response = http_request_.GetHttpResponse();
-      response.SetHeader(USERVER_NAMESPACE::http::headers::kXYaRequestId,
-                         span.GetLink());
 
       const auto status_code = response.GetStatus();
       span.SetLogLevel(handler_.GetLogLevelForResponseStatus(status_code));
@@ -122,8 +177,8 @@ class RequestProcessor final {
       span.AddTag(tracing::kHttpStatusCode, response_code);
       if (response_code >= 500) span.AddTag(tracing::kErrorFlag, true);
 
-      if (log_request_) {
-        if (log_request_headers_) {
+      if (settings_.need_log_request) {
+        if (settings_.need_log_request_headers) {
           span.AddNonInheritableTag("response_headers",
                                     GetHeadersLogString(response));
         }
@@ -138,47 +193,76 @@ class RequestProcessor final {
   }
 
   template <typename Func>
-  bool ProcessRequestStep(const std::string& step_name,
+  void ProcessRequestStep(std::string_view step_name,
                           const Func& process_step_func) {
-    if (process_finished_) return true;
-    process_finished_ = DoProcessRequestStep(step_name, process_step_func);
-    return process_finished_;
+    if (process_finished_) return;
+    const tracing::ScopeTime scope_time{utils::StrCat("http_", step_name)};
+    DoProcessRequestStep(step_name, process_step_func);
+  }
+
+  template <typename Func>
+  void ProcessRequestStepNoScopeTime(std::string_view step_name,
+                                     const Func& process_step_func) {
+    if (process_finished_) return;
+    DoProcessRequestStep(step_name, process_step_func);
+  }
+
+  void HandleCustomException(std::string_view step_name,
+                             const CustomHandlerException& ex) {
+    process_finished_ = true;
+    auto& response = http_request_.GetHttpResponse();
+    auto http_status = http::GetHttpStatus(ex.GetCode());
+    auto level = handler_.GetLogLevelForResponseStatus(http_status);
+    LOG(level) << "custom handler exception in '" << handler_.HandlerName()
+               << "' handler in " << step_name << ": msg=" << ex;
+
+    response.SetStatus(http_status);
+    if (ex.IsExternalErrorBodyFormatted()) {
+      response.SetData(ex.GetExternalErrorBody());
+    } else {
+      SetFormattedErrorResponse(response,
+                                handler_.GetFormattedExternalErrorBody(ex));
+    }
+    for (const auto& [name, value] : ex.GetExtraHeaders()) {
+      response.SetHeader(name, value);
+    }
+  }
+
+  const http::HttpRequest& GetRequest() { return http_request_; }
+
+  const HttpHandlerBase& GetHandler() const { return handler_; }
+
+  request::RequestContext& GetContext() { return context_; }
+
+  const dynamic_config::Snapshot& GetDynamicConfig() const {
+    return config_snapshot_;
+  }
+
+  const HttpServerSettings& GetServerSettings() const { return settings_; }
+
+  void ResetDynamicConfig() {
+    [[maybe_unused]] const auto for_destruction = std::move(config_snapshot_);
   }
 
  private:
   template <typename Func>
-  bool DoProcessRequestStep(const std::string& step_name,
+  void DoProcessRequestStep(std::string_view step_name,
                             const Func& process_step_func) {
-    const tracing::ScopeTime scope_time{"http_" + step_name};
-    auto& response = http_request_.GetHttpResponse();
-
     try {
       process_step_func();
     } catch (const CustomHandlerException& ex) {
-      auto http_status = http::GetHttpStatus(ex.GetCode());
-      auto level = handler_.GetLogLevelForResponseStatus(http_status);
-      LOG(level) << "custom handler exception in '" << handler_.HandlerName()
-                 << "' handler in " + step_name + ": msg=" << ex;
-      response.SetStatus(http_status);
-      if (ex.IsExternalErrorBodyFormatted()) {
-        response.SetData(ex.GetExternalErrorBody());
-      } else {
-        SetFormattedErrorResponse(response,
-                                  handler_.GetFormattedExternalErrorBody(ex));
-      }
-      for (const auto& [name, value] : ex.GetExtraHeaders()) {
-        response.SetHeader(name, value);
-      }
-      return true;
+      HandleCustomException(step_name, ex);
     } catch (const std::exception& ex) {
+      process_finished_ = true;
+      auto& response = http_request_.GetHttpResponse();
       if (engine::current_task::ShouldCancel()) {
         LOG_WARNING() << "request task cancelled, exception in '"
-                      << handler_.HandlerName()
-                      << "' handler in " + step_name + ": " << ex.what();
+                      << handler_.HandlerName() << "' handler in " << step_name
+                      << ": " << ex.what();
         response.SetStatus(http::HttpStatus::kClientClosedRequest);
       } else {
         LOG_ERROR() << "exception in '" << handler_.HandlerName()
-                    << "' handler in " + step_name + ": " << ex;
+                    << "' handler in " << step_name << ": " << ex;
         http_request_impl_.MarkAsInternalServerError();
         SetFormattedErrorResponse(response,
                                   handler_.GetFormattedExternalErrorBody({
@@ -186,15 +270,14 @@ class RequestProcessor final {
                                       HandlerErrorCode::kServerSideError,
                                   }));
       }
-      return true;
     } catch (...) {
+      process_finished_ = true;
+      auto& response = http_request_.GetHttpResponse();
       LOG_WARNING() << "unknown exception in '" << handler_.HandlerName()
-                    << "' handler in " + step_name + " (task cancellation?)";
+                    << "' handler in " << step_name << " (task cancellation?)";
       response.SetStatus(http::HttpStatus::kClientClosedRequest);
       throw;
     }
-
-    return false;
   }
 
   const HttpHandlerBase& handler_;
@@ -203,8 +286,8 @@ class RequestProcessor final {
   bool process_finished_{false};
 
   request::RequestContext& context_;
-  const bool log_request_;
-  const bool log_request_headers_;
+  dynamic_config::Snapshot config_snapshot_;
+  const HttpServerSettings settings_;
 };
 
 std::optional<std::chrono::milliseconds> ParseTimeout(
@@ -233,43 +316,125 @@ std::optional<std::chrono::milliseconds> ParseTimeout(
   return timeout;
 }
 
-void SetDeadlineInfoForRequest(const http::HttpRequest& request,
-                               std::chrono::steady_clock::time_point start_time,
-                               const HttpServerSettings& settings,
-                               request::TaskInheritedData& info) {
-  info.start_time = start_time;
+enum class IsCancelledByDeadline : bool {};
 
-  const auto timeout = ParseTimeout(request);
+constexpr std::string_view kDeadlinePropagationStep =
+    "check_deadline_propagation";
+
+utils::impl::UserverExperiment handler_cancel_on_immediate_deadline_expiration{
+    "handler-cancel-on-immediate-deadline-expiration", true};
+
+utils::impl::UserverExperiment handler_override_response_on_deadline{
+    "handler-override-response-on-deadline", true};
+
+void HandleDeadlineExpired(RequestProcessor& processor,
+                           IsCancelledByDeadline& is_cancelled,
+                           std::string internal_message) {
+  processor.HandleCustomException(
+      kDeadlinePropagationStep,
+      ExceptionWithCode<HandlerErrorCode::kGatewayTimeout>(
+          ExternalBody{"Deadline expired"},
+          InternalMessage{std::move(internal_message)},
+          ServiceErrorCode{"deadline_expired"}));
+  is_cancelled = IsCancelledByDeadline{true};
+}
+
+void SetUpInheritedDeadline(RequestProcessor& processor,
+                            IsCancelledByDeadline& is_cancelled,
+                            request::TaskInheritedData& inherited_data) {
+  if (!processor.GetHandler().GetConfig().deadline_propagation_enabled) return;
+
+  const auto& server_settings = processor.GetServerSettings();
+  if (!server_settings.deadline_propagation_enabled) return;
+
+  const auto timeout = ParseTimeout(processor.GetRequest());
   if (!timeout) return;
-  const auto deadline = engine::Deadline::FromTimePoint(start_time + *timeout);
 
-  info.deadline = deadline;
-  if (settings.need_cancel_handle_request_by_deadline) {
+  auto& span = tracing::Span::CurrentSpan();
+  span.AddNonInheritableTag("deadline_received_ms", timeout->count());
+
+  const auto deadline = engine::Deadline::FromTimePoint(
+      processor.GetRequest().GetStartTime() + *timeout);
+  inherited_data.deadline = deadline;
+
+  if (handler_cancel_on_immediate_deadline_expiration.IsEnabled() &&
+      deadline.IsSurelyReachedApprox()) {
+    HandleDeadlineExpired(
+        processor, is_cancelled,
+        "Immediate timeout (deadline propagation), forcing 504 response");
+    return;
+  }
+
+  if (server_settings.need_cancel_handle_request_by_deadline) {
     engine::current_task::SetDeadline(deadline);
   }
 }
 
-void SetDeadlineTags(tracing::Span& span,
-                     const request::TaskInheritedData& info) noexcept {
-  if (!info.deadline.IsReachable()) return;
+void SetUpInheritedData(RequestProcessor& processor,
+                        IsCancelledByDeadline& is_cancelled) {
+  request::TaskInheritedData inherited_data{
+      std::visit(
+          utils::Overloaded{
+              [](const std::string& path) -> std::string_view { return path; },
+              [](const FallbackHandler&) -> std::string_view {
+                return "<fallback>";
+              }},
+          processor.GetHandler().GetConfig().path),
+      processor.GetRequest().GetMethodStr(),
+      processor.GetRequest().GetStartTime(),
+      engine::Deadline{},
+  };
+
+  const utils::FastScopeGuard set_inherited_data_guard([&]() noexcept {
+    request::kTaskInheritedData.Set(std::move(inherited_data));
+  });
+
+  SetUpInheritedDeadline(processor, is_cancelled, inherited_data);
+}
+
+void CompleteDeadlinePropagation(RequestProcessor& processor,
+                                 IsCancelledByDeadline& is_cancelled) {
+  const auto& request = processor.GetRequest();
+  auto& response = request.GetHttpResponse();
+
+  const auto& inherited_data = request::kTaskInheritedData.Get();
+  if (!inherited_data.deadline.IsReachable()) return;
 
   const bool cancelled_by_deadline =
       engine::current_task::CancellationReason() ==
-      engine::TaskCancellationReason::kDeadline;
+          engine::TaskCancellationReason::kDeadline ||
+      inherited_data.deadline.IsReached();
 
-  span.AddNonInheritableTag("deadline_received", info.deadline.IsReachable());
+  auto& span = tracing::Span::CurrentSpan();
   span.AddNonInheritableTag("cancelled_by_deadline", cancelled_by_deadline);
+
+  if (handler_override_response_on_deadline.IsEnabled() &&
+      cancelled_by_deadline && !static_cast<bool>(is_cancelled)) {
+    const auto& original_body = response.GetData();
+    if (!original_body.empty() && span.ShouldLogDefault()) {
+      span.AddNonInheritableTag("dp_original_body_size", original_body.size());
+      if (processor.GetServerSettings().need_log_request) {
+        span.AddNonInheritableTag(
+            "dp_original_body",
+            processor.GetHandler().GetResponseDataForLoggingChecked(
+                request, processor.GetContext(), response.GetData()));
+      }
+    }
+    HandleDeadlineExpired(
+        processor, is_cancelled,
+        "Handling timeout (deadline propagation), forcing 504 response");
+  }
 }
 
 std::string CutTrailingSlash(
-    std::string meta_type,
+    std::string&& meta_type,
     server::handlers::UrlTrailingSlashOption trailing_slash) {
   if (trailing_slash == UrlTrailingSlashOption::kBoth && meta_type.size() > 1 &&
       meta_type.back() == '/') {
     meta_type.pop_back();
   }
 
-  return meta_type;
+  return std::move(meta_type);
 }
 
 // Separate function to avoid heavy computations when the result is not going
@@ -321,6 +486,9 @@ HttpHandlerBase::HttpHandlerBase(const components::ComponentConfig& config,
           context.FindComponent<components::DynamicConfig>().GetSource()),
       allowed_methods_(InitAllowedMethods(GetConfig())),
       handler_name_(config.Name()),
+      tracing_manager_(
+          context.FindComponent<tracing::DefaultTracingManagerLocator>()
+              .GetTracingManager()),
       handler_statistics_(std::make_unique<HttpHandlerStatistics>()),
       request_statistics_(std::make_unique<HttpRequestStatistics>()),
       auth_checkers_(auth::CreateAuthCheckers(
@@ -353,26 +521,33 @@ HttpHandlerBase::HttpHandlerBase(const components::ComponentConfig& config,
     throw std::runtime_error(std::string("can't add handler to server: ") +
                              ex.what());
   }
-  /// TODO: unable to add prefix metadata ATM
 
-  const auto graphite_subpath = std::visit(
-      utils::Overloaded{[](const std::string& path) {
-                          return "by-path." + utils::graphite::EscapeName(path);
+  std::vector<utils::statistics::Label> labels{
+      {"http_handler", config.Name()},
+  };
+
+  auto prefix = std::visit(
+      utils::Overloaded{[&](const std::string& path) {
+                          labels.emplace_back(
+                              "http_path", utils::graphite::EscapeName(path));
+                          return std::string{"http"};
                         },
                         [](FallbackHandler fallback) {
-                          return "by-fallback." + ToString(fallback);
+                          return "http.by-fallback." + ToString(fallback);
                         }},
       GetConfig().path);
-  const auto graphite_path =
-      fmt::format("http.{}.by-handler.{}", graphite_subpath, config.Name());
 
   auto& statistics_storage =
       context.FindComponent<components::StatisticsStorage>().GetStorage();
-  statistics_holder_ = statistics_storage.RegisterExtender(
-      graphite_path,
-      [this](const utils::statistics::StatisticsRequest& request) {
-        return ExtendStatistics(request);
-      });
+  statistics_holder_ = statistics_storage.RegisterWriter(
+      std::move(prefix),
+      [this](utils::statistics::Writer& result) {
+        FormatStatistics(result["handler"], *handler_statistics_);
+        if constexpr (kIncludeServerHttpMetrics) {
+          FormatStatistics(result["request"], *request_statistics_);
+        }
+      },
+      std::move(labels));
 
   set_response_server_hostname_ =
       GetConfig().set_response_server_hostname.value_or(
@@ -383,120 +558,146 @@ HttpHandlerBase::HttpHandlerBase(const components::ComponentConfig& config,
 
 HttpHandlerBase::~HttpHandlerBase() { statistics_holder_.Unregister(); }
 
+void HttpHandlerBase::HandleRequestStream(
+    const http::HttpRequest& http_request,
+    request::RequestContext& context) const {
+  auto& response = http_request.GetHttpResponse();
+  const utils::ScopeGuard scope([&response] { response.SetHeadersEnd(); });
+
+  auto& http_response = http_request.GetHttpResponse();
+  server::http::ResponseBodyStream response_body_stream{
+      response.GetBodyProducer(), http_response};
+
+  // Just in case HandleStreamRequest() throws an exception.
+  // Though it can be changed in HandleStreamRequest().
+  response_body_stream.SetStatusCode(500);
+
+  try {
+    HandleStreamRequest(http_request, context, response_body_stream);
+  } catch (const CustomHandlerException& e) {
+    response_body_stream.SetStatusCode(http::GetHttpStatus(e.GetCode()));
+
+    for (const auto& [name, value] : e.GetExtraHeaders()) {
+      response_body_stream.SetHeader(name, value);
+    }
+    if (e.IsExternalErrorBodyFormatted()) {
+      response_body_stream.SetEndOfHeaders();
+      response_body_stream.PushBodyChunk(std::string{e.GetExternalErrorBody()},
+                                         engine::Deadline());
+    } else {
+      auto formatted_error = GetFormattedExternalErrorBody(e);
+      SetFormattedErrorResponse(response_body_stream,
+                                std::move(formatted_error), engine::Deadline());
+    }
+  } catch (const std::exception& e) {
+    if (engine::current_task::ShouldCancel()) {
+      LOG_WARNING() << "request task cancelled, exception in '" << HandlerName()
+                    << "' handler in handle_request: " << e;
+      response_body_stream.SetStatusCode(
+          http::HttpStatus::kClientClosedRequest);
+    } else {
+      LOG_ERROR() << "exception in '" << HandlerName()
+                  << "' handler in handle_request: " << e;
+      response_body_stream.SetStatusCode(500);
+      SetFormattedErrorResponse(response,
+                                GetFormattedExternalErrorBody({
+                                    ExternalBody{response.GetData()},
+                                    HandlerErrorCode::kServerSideError,
+                                }));
+    }
+  }
+}
+
 void HttpHandlerBase::HandleRequest(request::RequestBase& request,
                                     request::RequestContext& context) const {
-  auto& http_request_impl = dynamic_cast<http::HttpRequestImpl&>(request);
+  UASSERT(dynamic_cast<http::HttpRequestImpl*>(&request));
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+  auto& http_request_impl = static_cast<http::HttpRequestImpl&>(request);
   http::HttpRequest http_request(http_request_impl);
   auto& response = http_request.GetHttpResponse();
+  std::optional<tracing::Span> span_storage;
 
   try {
     HttpHandlerStatisticsScope stats_scope(*handler_statistics_,
                                            http_request.GetMethod(), response);
-
-    const auto server_settings = config_source_.GetCopy(kHttpServerSettings);
-
-    const auto& config = GetConfig();
-    request::TaskInheritedData inherited_data{
-        std::get_if<std::string>(&config.path), http_request.GetMethodStr(),
-        /*start_time*/ {}, engine::Deadline{}};
-    SetDeadlineInfoForRequest(http_request, request.StartTime(),
-                              server_settings, inherited_data);
-    request::kTaskInheritedData.Set(inherited_data);
-
-    const auto& parent_link =
-        http_request.GetHeader(USERVER_NAMESPACE::http::headers::kXYaRequestId);
-    const auto& trace_id =
-        http_request.GetHeader(USERVER_NAMESPACE::http::headers::kXYaTraceId);
-    const auto& parent_span_id =
-        http_request.GetHeader(USERVER_NAMESPACE::http::headers::kXYaSpanId);
-
-    auto span = tracing::Span::MakeSpan(fmt::format("http/{}", HandlerName()),
-                                        trace_id, parent_span_id);
-
-    response.SetHeader(USERVER_NAMESPACE::http::headers::kXYaTraceId,
-                       span.GetTraceId());
-    response.SetHeader(USERVER_NAMESPACE::http::headers::kXYaSpanId,
-                       span.GetSpanId());
-
-    span.SetLocalLogLevel(log_level_);
-
-    if (!parent_link.empty()) span.SetParentLink(parent_link);
+    IsCancelledByDeadline is_cancelled_by_deadline{false};
 
     const auto meta_type = CutTrailingSlash(GetMetaType(http_request),
                                             GetConfig().url_trailing_slash);
+    span_storage.emplace(MakeSpan(http_request, meta_type));
+    // All fallible or logging steps should go after this to get good logs.
 
-    span.AddNonInheritableTag(tracing::kHttpMetaType, meta_type);
-    span.AddNonInheritableTag(tracing::kType, kTracingTypeResponse);
-    span.AddNonInheritableTag(tracing::kHttpMethod,
-                              http_request.GetMethodStr());
-    utils::FastScopeGuard deadline_tags_guard(
-        [&]() noexcept { SetDeadlineTags(span, inherited_data); });
+    RequestProcessor request_processor(*this, http_request_impl, http_request,
+                                       context, config_source_.GetSnapshot());
 
-    static const std::string kParseRequestDataStep = "parse_request_data";
-    static const std::string kCheckAuthStep = "check_auth";
-    static const std::string kCheckRatelimitStep = "check_ratelimit";
-    static const std::string kHandleRequestStep = "handle_request";
-    static const std::string kDecompressRequestBody = "decompress_request_body";
-
-    RequestProcessor request_processor(
-        *this, http_request_impl, http_request, context,
-        server_settings.need_log_request,
-        server_settings.need_log_request_headers);
+    SetUpBaggage(http_request, request_processor.GetDynamicConfig());
+    LogYandexHeaders(http_request);
 
     request_processor.ProcessRequestStep(
-        kCheckRatelimitStep,
-        [this, &http_request] { return CheckRatelimit(http_request); });
+        "check_ratelimit",
+        [this, &http_request] { CheckRatelimit(http_request); });
+
+    request_processor.ProcessRequestStepNoScopeTime(
+        kDeadlinePropagationStep,
+        [&request_processor, &is_cancelled_by_deadline] {
+          SetUpInheritedData(request_processor, is_cancelled_by_deadline);
+        });
 
     request_processor.ProcessRequestStep(
-        kCheckAuthStep,
+        "check_auth",
         [this, &http_request, &context] { CheckAuth(http_request, context); });
 
     if (GetConfig().decompress_request) {
       request_processor.ProcessRequestStep(
-          kDecompressRequestBody,
+          "decompress_request_body",
           [this, &http_request] { DecompressRequestBody(http_request); });
     }
 
     request_processor.ProcessRequestStep(
-        kParseRequestDataStep, [this, &http_request, &context] {
+        "parse_request_data", [this, &http_request, &context] {
           ParseRequestData(http_request, context);
         });
 
-    if (server_settings.need_log_request) {
-      LOG_INFO() << "start handling"
-                 << LogRequestExtra(
-                        server_settings.need_log_request_headers, http_request,
-                        meta_type,
-                        GetRequestBodyForLoggingChecked(
-                            http_request, context, http_request.RequestBody()),
-                        http_request.RequestBody().length());
+    if (request_processor.GetServerSettings().need_log_request) {
+      LOG_INFO()
+          << "start handling"
+          << LogRequestExtra(
+                 request_processor.GetServerSettings().need_log_request_headers,
+                 http_request, meta_type,
+                 GetRequestBodyForLoggingChecked(http_request, context,
+                                                 http_request.RequestBody()),
+                 http_request.RequestBody().length());
+    }
+
+    {
+      // Don't hold the config snapshot for too long, especially with streaming.
+      request_processor.ResetDynamicConfig();
     }
 
     request_processor.ProcessRequestStep(
-        kHandleRequestStep, [this, &response, &http_request, &context] {
+        "handle_request", [this, &response, &http_request, &context] {
           if (response.IsBodyStreamed()) {
-            auto& response = http_request.GetHttpResponse();
-            utils::ScopeGuard scope([&response] { response.SetHeadersEnd(); });
-
-            server::http::ResponseBodyStream response_body_stream{
-                response.GetBodyProducer(), http_request.GetHttpResponse()};
-
-            // Just in case HandleStreamRequest() throws an exception.
-            // Though it can be changed in HandleStreamRequest().
-            response_body_stream.SetStatusCode(500);
-
-            HandleStreamRequest(http_request, context, response_body_stream);
+            HandleRequestStream(http_request, context);
           } else {
             // !IsBodyStreamed()
             response.SetData(HandleRequestThrow(http_request, context));
           }
         });
+
+    CompleteDeadlinePropagation(request_processor, is_cancelled_by_deadline);
+    if (GetConfig().set_tracing_headers) {
+      tracing_manager_.FillResponseWithTracingContext(*span_storage, response);
+    }
+    if (static_cast<bool>(is_cancelled_by_deadline)) {
+      stats_scope.OnCancelledByDeadline();
+    }
   } catch (const std::exception& ex) {
     LOG_ERROR() << "unable to handle request: " << ex;
   }
 
   SetResponseAcceptEncoding(response);
   SetResponseServerHostname(response);
+  response.SetHeadersEnd();
 }
 
 void HttpHandlerBase::ThrowUnsupportedHttpMethod(
@@ -525,7 +726,9 @@ void HttpHandlerBase::HandleStreamRequest(
 void HttpHandlerBase::ReportMalformedRequest(
     request::RequestBase& request) const {
   try {
-    auto& http_request_impl = dynamic_cast<http::HttpRequestImpl&>(request);
+    UASSERT(dynamic_cast<http::HttpRequestImpl*>(&request));
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+    auto& http_request_impl = static_cast<http::HttpRequestImpl&>(request);
     const http::HttpRequest http_request(http_request_impl);
     auto& response = http_request.GetHttpResponse();
 
@@ -568,6 +771,21 @@ FormattedErrorData HttpHandlerBase::GetFormattedExternalErrorBody(
   return {exc.GetExternalErrorBody()};
 }
 
+tracing::Span HttpHandlerBase::MakeSpan(const http::HttpRequest& http_request,
+                                        const std::string& meta_type) const {
+  tracing::SpanBuilder span_builder(fmt::format("http/{}", HandlerName()));
+  tracing_manager_.TryFillSpanBuilderFromRequest(http_request, span_builder);
+  auto span = std::move(span_builder).Build();
+
+  span.SetLocalLogLevel(log_level_);
+
+  span.AddNonInheritableTag(tracing::kHttpMetaType, meta_type);
+  span.AddNonInheritableTag(tracing::kType, kTracingTypeResponse);
+  span.AddNonInheritableTag(tracing::kHttpMethod, http_request.GetMethodStr());
+
+  return span;
+}
+
 void HttpHandlerBase::CheckAuth(const http::HttpRequest& http_request,
                                 request::RequestContext& context) const {
   if (!config_source_.GetCopy(kHttpServerSettings)
@@ -599,7 +817,8 @@ void HttpHandlerBase::CheckRatelimit(
                     GetConfig().max_requests_per_second.value_or(0));
     SetThrottleReason(
         http_response, std::move(log_reason),
-        USERVER_NAMESPACE::http::headers::ratelimit_reason::kGlobal);
+        std::string{
+            USERVER_NAMESPACE::http::headers::ratelimit_reason::kGlobal});
     statistics.IncrementRateLimitReached();
     total_statistics.IncrementRateLimitReached();
 
@@ -615,7 +834,8 @@ void HttpHandlerBase::CheckRatelimit(
                                   *max_requests_in_flight);
     SetThrottleReason(
         http_response, std::move(log_reason),
-        USERVER_NAMESPACE::http::headers::ratelimit_reason::kInFlight);
+        std::string{
+            USERVER_NAMESPACE::http::headers::ratelimit_reason::kInFlight});
 
     statistics.IncrementTooManyRequestsInFlight();
     total_statistics.IncrementTooManyRequestsInFlight();
@@ -628,10 +848,16 @@ void HttpHandlerBase::DecompressRequestBody(
     http::HttpRequest& http_request) const {
   if (!http_request.IsBodyCompressed()) return;
 
-  const auto& content_encoding = http_request.GetHeader("Content-Encoding");
+  const auto& content_encoding = http_request.GetHeader(
+      USERVER_NAMESPACE::http::headers::kContentEncoding);
+  const utils::FastScopeGuard encoding_remove_guard{[&http_request]() noexcept {
+    http_request.RemoveHeader(
+        USERVER_NAMESPACE::http::headers::kContentEncoding);
+  }};
 
   try {
     if (content_encoding == "gzip") {
+      http_request.RemoveHeader("Content-Encoding");
       auto body = compression::gzip::Decompress(
           http_request.RequestBody(),
           GetConfig().request_config.max_request_size);
@@ -656,14 +882,14 @@ void HttpHandlerBase::DecompressRequestBody(
 std::string HttpHandlerBase::GetRequestBodyForLogging(
     const http::HttpRequest&, request::RequestContext&,
     const std::string& request_body) const {
-  size_t limit = GetConfig().request_body_size_log_limit;
+  const std::size_t limit = GetConfig().request_body_size_log_limit;
   return utils::log::ToLimitedUtf8(request_body, limit);
 }
 
 std::string HttpHandlerBase::GetResponseDataForLogging(
     const http::HttpRequest&, request::RequestContext&,
     const std::string& response_data) const {
-  size_t limit = GetConfig().response_data_size_log_limit;
+  const std::size_t limit = GetConfig().response_data_size_log_limit;
   return utils::log::ToLimitedUtf8(response_data, limit);
 }
 
@@ -695,34 +921,16 @@ std::string HttpHandlerBase::GetResponseDataForLoggingChecked(
 }
 
 template <typename HttpStatistics>
-formats::json::ValueBuilder HttpHandlerBase::FormatStatistics(
-    const HttpStatistics& stats) {
-  formats::json::ValueBuilder result;
-  result["all-methods"] = stats.GetTotal();
-  utils::statistics::SolomonSkip(result["all-methods"]);
+void HttpHandlerBase::FormatStatistics(utils::statistics::Writer result,
+                                       const HttpStatistics& stats) {
+  result = stats.GetTotal();
 
   if (IsMethodStatisticIncluded()) {
-    formats::json::ValueBuilder by_method;
     for (auto method : GetAllowedMethods()) {
-      by_method[ToString(method)] = stats.GetByMethod(method);
+      result.ValueWithLabels(stats.GetByMethod(method),
+                             {"http_method", ToString(method)});
     }
-    utils::statistics::SolomonChildrenAreLabelValues(by_method, "http_method");
-    utils::statistics::SolomonSkip(by_method);
-    result["by-method"] = std::move(by_method);
   }
-  return result;
-}
-
-formats::json::ValueBuilder HttpHandlerBase::ExtendStatistics(
-    const utils::statistics::StatisticsRequest& /*request*/) {
-  formats::json::ValueBuilder result;
-  result["handler"] = FormatStatistics(*handler_statistics_);
-
-  if constexpr (kIncludeServerHttpMetrics) {
-    result["request"] = FormatStatistics(*request_statistics_);
-  }
-
-  return result;
 }
 
 void HttpHandlerBase::SetResponseAcceptEncoding(

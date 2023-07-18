@@ -22,8 +22,14 @@ std::ostream& operator<<(std::ostream& os, Status s) {
       return os << "400 BadRequest";
     case NotFound:
       return os << "404 Not Found";
+    case MethodNotAllowed:
+      return os << "405 Method Not Allowed";
+    case NotAcceptable:
+      return os << "406 Not Acceptable";
     case Conflict:
       return os << "409 Conflict";
+    case TooManyRequests:
+      return os << "429 Too Many Requests";
     case InternalServerError:
       return os << "500 Internal Server Error";
     case BadGateway:
@@ -34,16 +40,16 @@ std::ostream& operator<<(std::ostream& os, Status s) {
       return os << "504 Gateway Timeout";
     case InsufficientStorage:
       return os << "507 Insufficient Storage";
-    case BandwithLimitExceeded:
-      return os << "509 Bandwith Limit Exceeded";
+    case BandwidthLimitExceeded:
+      return os << "509 Bandwidth Limit Exceeded";
     case WebServerIsDown:
       return os << "520 Web Server Is Down";
     case ConnectionTimedOut:
       return os << "522 Connection Timed Out";
     case OriginIsUnreachable:
       return os << "523 Origin Is Unreachable";
-    case TimeoutOccured:
-      return os << "524 A Timeout Occured";
+    case TimeoutOccurred:
+      return os << "524 A Timeout Occurred";
     case SslHandshakeFailed:
       return os << "525 SSL Handshake Failed";
     case InvalidSslCertificate:

@@ -1,34 +1,49 @@
 #include <userver/utest/utest.hpp>
 
+#include <gmock/gmock.h>
+
 #include <logging/dynamic_debug.hpp>
 #include <logging/logging_test.hpp>
-#include <userver/logging/log.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
-TEST_F(LoggingTest, DynamicDebugBasic) {
-  logging::SetDefaultLoggerLevel(logging::Level::kNone);
+TEST_F(LoggingTest, DynamicDebugEnable) {
+  SetDefaultLoggerLevel(logging::Level::kNone);
 
   LOG_INFO() << "before";
 
   const std::string location = USERVER_FILEPATH;
-  logging::AddDynamicDebugLog(location, 17);
+  logging::AddDynamicDebugLog(location, 10001);
 
+#line 10001
   LOG_INFO() << "123";
 
-  logging::RemoveDynamicDebugLog(location, 17);
+  logging::RemoveDynamicDebugLog(location, 10001);
 
   LOG_INFO() << "after";
 
-  EXPECT_FALSE(LoggedTextContains("before"));
-  EXPECT_TRUE(LoggedTextContains("123"));
-  EXPECT_FALSE(LoggedTextContains("after"));
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("before")));
+  EXPECT_THAT(GetStreamString(), testing::HasSubstr("123"));
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("after")));
+}
 
-  logging::SetDefaultLoggerLevel(logging::Level::kInfo);
+TEST_F(LoggingTest, DynamicDebugDisable) {
+  SetDefaultLoggerLevel(logging::Level::kInfo);
+
+  const std::string location = USERVER_FILEPATH;
+  logging::AddDynamicDebugLog(location, 10002,
+                              logging::EntryState::kForceDisabled);
+
+#line 10002
+  LOG_INFO() << "here";
+
+  logging::RemoveDynamicDebugLog(location, 10002);
+
+  EXPECT_FALSE(LoggedTextContains("here"));
 }
 
 TEST_F(LoggingTest, DynamicDebugAnyLine) {
-  logging::SetDefaultLoggerLevel(logging::Level::kNone);
+  SetDefaultLoggerLevel(logging::Level::kNone);
 
   LOG_INFO() << "before";
 
@@ -42,24 +57,23 @@ TEST_F(LoggingTest, DynamicDebugAnyLine) {
 
   LOG_INFO() << "after";
 
-  EXPECT_FALSE(LoggedTextContains("before"));
-  EXPECT_TRUE(LoggedTextContains("123"));
-  EXPECT_TRUE(LoggedTextContains("456"));
-  EXPECT_FALSE(LoggedTextContains("after"));
-
-  logging::SetDefaultLoggerLevel(logging::Level::kInfo);
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("before")));
+  EXPECT_THAT(GetStreamString(), testing::HasSubstr("123"));
+  EXPECT_THAT(GetStreamString(), testing::HasSubstr("456"));
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("after")));
 }
 
 TEST_F(LoggingTest, DynamicDebugAnyLineRemove) {
-  logging::SetDefaultLoggerLevel(logging::Level::kNone);
+  SetDefaultLoggerLevel(logging::Level::kNone);
 
   LOG_INFO() << "before";
 
   const std::string location = USERVER_FILEPATH;
-  logging::AddDynamicDebugLog(location, 63);
-  logging::AddDynamicDebugLog(location, 64);
+  logging::AddDynamicDebugLog(location, 20001);
+  logging::AddDynamicDebugLog(location, 20002);
   logging::RemoveDynamicDebugLog(location, logging::kAnyLine);
 
+#line 20001
   LOG_INFO() << "123";
   LOG_INFO() << "456";
 
@@ -75,8 +89,6 @@ TEST_F(LoggingTest, DynamicDebugAnyLineRemove) {
   EXPECT_FALSE(LoggedTextContains("123"));
   EXPECT_FALSE(LoggedTextContains("456"));
   EXPECT_FALSE(LoggedTextContains("after"));
-
-  logging::SetDefaultLoggerLevel(logging::Level::kInfo);
 }
 
 USERVER_NAMESPACE_END

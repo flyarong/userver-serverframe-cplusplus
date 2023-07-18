@@ -27,7 +27,7 @@ namespace engine {
 ///
 /// ## Example usage:
 ///
-/// @snippet engine/single_use_event.cpp  Sample engine::SingleUseEvent usage
+/// @snippet engine/single_use_event_test.cpp  Wait and destroy
 ///
 /// @see @ref md_en_userver_synchronization
 class SingleUseEvent final {
@@ -56,6 +56,9 @@ class SingleUseEvent final {
   /// Resets the signal flag. Can be called after `WaitNonCancellable` returns
   /// if necessary to reuse the `SingleUseEvent` for another waiting session.
   void Reset() noexcept;
+
+  /// Returns true iff already signaled. Never resets the signal.
+  bool IsReady() const noexcept;
 
  private:
   std::atomic<std::uintptr_t> state_;

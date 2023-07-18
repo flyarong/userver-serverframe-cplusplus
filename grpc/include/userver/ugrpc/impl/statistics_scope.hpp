@@ -19,6 +19,12 @@ class RpcStatisticsScope final {
 
   void OnExplicitFinish(grpc::StatusCode code);
 
+  void CancelledByDeadlinePropagation();
+
+  void OnDeadlinePropagated();
+
+  void OnCancelled();
+
   void OnNetworkError();
 
  private:
@@ -34,6 +40,12 @@ class RpcStatisticsScope final {
 
     // A network error occurred (RpcInterruptedError)
     kNetworkError = 2,
+
+    // Closed by deadline propagation
+    kDeadlinePropagation = 3,
+
+    // Task was cancelled
+    kCancelled = 4,
   };
 
   void AccountStatus();

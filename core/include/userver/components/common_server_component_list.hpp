@@ -22,11 +22,13 @@ namespace components {
 /// * server::handlers::InspectRequests
 /// * server::handlers::Jemalloc
 /// * server::handlers::LogLevel
+/// * server::handlers::OnLogRotate
 /// * server::handlers::ServerMonitor
 /// * server::handlers::TestsControl
 /// * components::AuthCheckerSettings
 /// * congestion_control::Component
 /// * components::HttpServerSettings
+/// * tracing::DefaultTracingManagerLocator
 ComponentList CommonServerComponentList();
 
 }  // namespace components

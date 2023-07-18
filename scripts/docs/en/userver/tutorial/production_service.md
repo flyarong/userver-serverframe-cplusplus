@@ -13,7 +13,9 @@ A good production ready service should have functionality for various cases:
 * Metrics and Logs
 * Functional testing
 
-This tutorial shows a configuration of a typical production ready service.
+This tutorial shows a configuration of a typical production ready service. For
+information about service interactions with other utilities and services in
+container see @ref md_en_userver_deploy_env.
 
 
 ## Before you start
@@ -84,6 +86,7 @@ Your server has the following utility handlers:
 * to @ref md_en_userver_memory_profile_running_service "profile memory usage" - server::handlers::Jemalloc
 * to @ref md_en_userver_log_level_running_service "change logging level at runtime" - server::handlers::LogLevel
   and server::handlers::DynamicDebugLog
+* to reopen log files after log rotation (you can also use @ref md_en_userver_os_signals "signals") - server::handlers::OnLogRotate 
 * to @ref md_en_userver_dns_control "control the DNS resolver" - server::handlers::DnsClientControl
 * to @ref md_en_userver_service_monitor "get statistics" from the service - server::handlers::ServerMonitor
 

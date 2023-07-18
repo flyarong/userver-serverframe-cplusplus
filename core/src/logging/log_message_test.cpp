@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <boost/filesystem/path.hpp>
 
@@ -14,6 +15,8 @@
 #include <logging/rate_limit.hpp>
 #include <userver/decimal64/decimal64.hpp>
 #include <userver/formats/json/serialize.hpp>
+#include <userver/logging/null_logger.hpp>
+#include <userver/utils/regex.hpp>
 #include <userver/utils/traceful_exception.hpp>
 #include <utils/encoding/tskv_testdata_bin.hpp>
 
@@ -28,16 +31,10 @@ std::string ToStringViaStreams(const T& value) {
   return oss.str();
 }
 
-void CheckModulePath(const std::string& message, const std::string& expected) {
-  static const std::string kUservicesUserverRoot = "userver/";
-
+void CheckModulePath(std::string_view message, std::string_view expected) {
   auto module_pos = message.find("module=");
   ASSERT_NE(std::string::npos, module_pos) << "no module logged";
-  auto path_pos = message.find("( " + expected + ':', module_pos);
-  if (path_pos == std::string::npos) {
-    path_pos =
-        message.find("( " + kUservicesUserverRoot + expected + ':', module_pos);
-  }
+  auto path_pos = message.find(std::string{expected} + ':', module_pos);
   auto delim_pos = message.find('\t', module_pos);
   ASSERT_LT(path_pos, delim_pos)
       << "module mismatch, expected path '" << expected << "', found '"
@@ -74,7 +71,32 @@ TEST_F(LoggingTest, TskvEncodeKeyWithDot) {
   logging::LogExtra le;
   le.Extend("http.port.ipv4", "4040");
   LOG_CRITICAL() << "line 1\nline 2" << le;
-  EXPECT_EQ(LoggedText(), "line 1\\nline 2\thttp_port_ipv4=4040");
+  EXPECT_THAT(GetStreamString(),
+              testing::HasSubstr("line 1\\nline 2\thttp_port_ipv4=4040"));
+}
+
+TEST_F(LoggingTest, LogFormat) {
+  // Note: this is a golden test. The order and content of tags is stable, which
+  // is an implementation detail, but it makes this test possible. If the order
+  // or content of tags change, this test should be fixed to reflect the
+  // changes.
+  constexpr std::string_view kExpectedPattern =
+      R"(tskv\t)"
+      R"(timestamp=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\t)"
+      R"(level=[A-Z]+\t)"
+      R"(module=[\w\d ():./]+\t)"
+      R"(task_id=[0-9A-F]+\t)"
+      R"(thread_id=0x[0-9A-F]+\t)"
+      R"(text=test\t)"
+      R"(foo=bar\n)";
+  LOG_CRITICAL() << "test" << logging::LogExtra{{"foo", "bar"}};
+  logging::LogFlush();
+  EXPECT_TRUE(
+      utils::regex_match(GetStreamString(), utils::regex(kExpectedPattern)))
+      << GetStreamString();
+
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr(" ( /")))
+      << "Path shortening for logs stopped working.";
 }
 
 TEST_F(LoggingTest, FloatingPoint) {
@@ -135,13 +157,13 @@ TEST_F(LoggingTest, PlainException) {
 }
 
 TEST_F(LoggingTest, TracefulExceptionDebug) {
-  logging::SetDefaultLoggerLevel(logging::Level::kDebug);
+  SetDefaultLoggerLevel(logging::Level::kDebug);
 
   LOG_CRITICAL() << utils::TracefulException("traceful exception");
 
-  EXPECT_TRUE(LoggedTextContains("traceful exception"))
+  EXPECT_THAT(GetStreamString(), testing::HasSubstr("traceful exception"))
       << "traceful exception is missing its message";
-  EXPECT_TRUE(LoggedTextContains("\tstacktrace="))
+  EXPECT_THAT(GetStreamString(), testing::HasSubstr("\tstacktrace="))
       << "traceful exception is missing its trace";
 }
 
@@ -155,7 +177,7 @@ TEST_F(LoggingTest, TracefulExceptionInfo) {
 }
 
 TEST_F(LoggingTest, AttachedException) {
-  logging::SetDefaultLoggerLevel(logging::Level::kDebug);
+  SetDefaultLoggerLevel(logging::Level::kDebug);
 
   try {
     throw utils::impl::AttachTraceToException(
@@ -169,7 +191,7 @@ TEST_F(LoggingTest, AttachedException) {
       << "missing plain exception message";
   EXPECT_TRUE(LoggedTextContains("plain exception with additional info"))
       << "traceful exception message malformed";
-  EXPECT_TRUE(LoggedTextContains("\tstacktrace="))
+  EXPECT_THAT(GetStreamString(), testing::HasSubstr("\tstacktrace="))
       << "traceful exception missing its trace";
 }
 
@@ -214,21 +236,24 @@ TEST_F(LoggingTest, IfExpressionWithoutBraces) {
 TEST_F(LoggingTest, CppModulePath) {
   LOG_CRITICAL();
   logging::LogFlush();
-  CheckModulePath(GetStreamString(), "core/src/logging/log_message_test.cpp");
+  CheckModulePath(GetStreamString(),
+                  "userver/core/src/logging/log_message_test.cpp");
 }
 
 TEST_F(LoggingTest, HppModulePath) {
   LoggingHeaderFunction();
   logging::LogFlush();
-  CheckModulePath(GetStreamString(), "core/src/logging/log_message_test.hpp");
+  CheckModulePath(GetStreamString(),
+                  "userver/core/src/logging/log_message_test.hpp");
 }
 
 TEST_F(LoggingTest, ExternalModulePath) {
-  static const std::string kPath = "/somewhere_else/src/test.cpp";
+  static constexpr std::string_view kPath = "/somewhere_else/src/test.cpp";
 
   {
-    logging::LogHelper a(logging::DefaultLogger(), logging::Level::kCritical,
-                         kPath.c_str(), __LINE__, __func__);
+    logging::LogHelper a(
+        logging::GetDefaultLogger(), logging::Level::kCritical,
+        utils::impl::SourceLocation::Custom(__LINE__, kPath, __func__));
   }
   logging::LogFlush();
 
@@ -236,12 +261,26 @@ TEST_F(LoggingTest, ExternalModulePath) {
 }
 
 TEST_F(LoggingTest, LogHelperNullptr) {
-  static const std::string kPath = "/somewhere_else/src/test.cpp";
+  static constexpr std::string_view kPath = "/somewhere_else/src/test.cpp";
 
-  // logging::DefaultLoggerOptional() may return nullptr and the LogHelper
-  // must survive
-  logging::LogHelper(nullptr, logging::Level::kCritical, kPath.c_str(),
-                     __LINE__, __func__)
+  // LogHelper must survive nullptr
+  logging::LogHelper(
+      logging::LoggerPtr{}, logging::Level::kCritical,
+      utils::impl::SourceLocation::Custom(__LINE__, kPath, __func__))
+          .AsLvalue()
+      << "Test";
+  logging::LogFlush();
+
+  EXPECT_EQ(GetStreamString(), "");
+}
+
+TEST_F(LoggingTest, LogHelperNullLogger) {
+  static constexpr std::string_view kPath = "/somewhere_else/src/test.cpp";
+
+  // logging::impl::DefaultLoggerRef() may return NullLogger
+  logging::LogHelper(
+      logging::GetNullLogger(), logging::Level::kCritical,
+      utils::impl::SourceLocation::Custom(__LINE__, kPath, __func__))
           .AsLvalue()
       << "Test";
   logging::LogFlush();
@@ -256,8 +295,9 @@ TEST_F(LoggingTest, PartialPrefixModulePath) {
       "somewhere_else/src/test.cpp";
 
   {
-    logging::LogHelper a(logging::DefaultLogger(), logging::Level::kCritical,
-                         kPath.c_str(), __LINE__, __func__);
+    logging::LogHelper a(
+        logging::GetDefaultLogger(), logging::Level::kCritical,
+        utils::impl::SourceLocation::Custom(__LINE__, kPath, __func__));
   }
   logging::LogFlush();
 
@@ -446,65 +486,93 @@ TEST_F(LoggingTest, LogLimitedDisabled) {
 }
 
 TEST_F(LoggingTest, CustomLoggerLevel) {
-  std::ostringstream sstream;
-  sstream.str(std::string());
-  auto logger = MakeStreamLogger(sstream);
+  auto sstream_data = std::make_shared<LoggingSinkWithStream>();
+  auto logger = MakeNamedStreamLogger("other-logger", sstream_data,
+                                      logging::Format::kTskv);
 
   // LOG_*_TO() must use its own log level, not default logger's one
-  logging::SetDefaultLoggerLevel(logging::Level::kCritical);
-  logging::SetLoggerLevel(logger, logging::Level::kInfo);
+  SetDefaultLoggerLevel(logging::Level::kCritical);
+  logging::SetLoggerLevel(*logger, logging::Level::kInfo);
 
-  LOG_INFO_TO(logger) << "test";
-  LOG_LIMITED_INFO_TO(logger) << "mest";
-  LOG_DEBUG_TO(logger) << "tost";
-  LOG_LIMITED_DEBUG_TO(logger) << "most";
-  logging::LogFlush(logger);
+  LOG_INFO_TO(*logger) << "test";
+  LOG_LIMITED_INFO_TO(*logger) << "mest";
+  LOG_DEBUG_TO(*logger) << "tost";
+  LOG_LIMITED_DEBUG_TO(*logger) << "most";
+  logging::LogFlush(*logger);
 
-  auto result = sstream.str();
+  auto result = sstream_data->sstream.str();
   EXPECT_NE(result.find("test"), std::string::npos);
   EXPECT_NE(result.find("mest"), std::string::npos);
   EXPECT_EQ(result.find("tost"), std::string::npos);
   EXPECT_EQ(result.find("most"), std::string::npos);
 }
 
+TEST_F(LoggingTest, NullLogger) {
+  LOG_INFO_TO(logging::GetNullLogger()) << "1";
+  logging::GetNullLogger().SetLevel(logging::Level::kTrace);
+  LOG_INFO_TO(logging::GetNullLogger()) << "2";
+  EXPECT_FALSE(logging::GetNullLogger().ShouldLog(logging::Level::kInfo));
+
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("text=1")));
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("text=2")));
+}
+
+TEST_F(LoggingTest, NullLoggerPtr) {
+  auto ptr = logging::MakeNullLogger();
+  LOG_INFO_TO(ptr) << "1";
+  ptr->SetLevel(logging::Level::kTrace);
+  LOG_INFO_TO(ptr) << "2";
+  EXPECT_FALSE(ptr->ShouldLog(logging::Level::kInfo));
+
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("text=1")));
+  EXPECT_THAT(GetStreamString(), testing::Not(testing::HasSubstr("text=2")));
+}
+
 TEST_F(LoggingTest, Noexceptness) {
   static_assert(noexcept(logging::ShouldLog(logging::Level::kCritical)));
   static_assert(noexcept(logging::impl::Noop{}));
-  static_assert(noexcept(logging::DefaultLoggerOptional()));
+  static_assert(noexcept(logging::GetDefaultLogger()));
   static_assert(noexcept(logging::LogExtra()));
   static_assert(noexcept(logging::LogExtra::Stacktrace()));
-  static_assert(noexcept(
-      logging::LogHelper(nullptr, logging::Level::kCritical, {}, 1, {})));
 
-  // TODO: uncomment after upgrading to a new Standard Library with string_view
-  // constructors marked as noexcept.
-  /*
-  static_assert(
-      noexcept(logging::LogHelper(nullptr, logging::Level::kCritical,
-                                    USERVER_FILEPATH, __LINE__, __func__)));
+  if constexpr (noexcept(std::string_view{"some string"})) {
+    EXPECT_TRUE(noexcept(logging::LogHelper(logging::GetNullLogger(),
+                                            logging::Level::kCritical)));
 
-  static_assert(noexcept(LOG_TRACE()));
-  static_assert(noexcept(LOG_DEBUG()));
-  static_assert(noexcept(LOG_INFO()));
-  static_assert(noexcept(LOG_WARNING()));
-  static_assert(noexcept(LOG_ERROR()));
-  static_assert(noexcept(LOG_CRITICAL()));
+    EXPECT_TRUE(noexcept(logging::LogHelper(logging::GetNullLogger(),
+                                            logging::Level::kCritical)));
 
-  static_assert(noexcept(LOG_TACE() << "Test"));
-  static_assert(noexcept(LOG_DEBUG() << "Test"));
-  static_assert(noexcept(LOG_INFO() << "Test"));
-  static_assert(noexcept(LOG_WARNING() << "Test"));
-  static_assert(noexcept(LOG_ERROR() << "Test"));
-  static_assert(noexcept(LOG_CRITICAL() << "Test"));
+    EXPECT_TRUE(noexcept(
+        logging::LogHelper(logging::LoggerPtr{}, logging::Level::kCritical)));
 
-  using logging::LogExtra;
-  static_assert(noexcept(LOG_TACE() << "Test" << LogExtra::Stacktrace()));
-  static_assert(noexcept(LOG_DEUBG() << "Test" << LogExtra::Stacktrace()));
-  static_assert(noexcept(LOG_INFO() << "Test" << LogExtra::Stacktrace()));
-  static_assert(noexcept(LOG_WARNING() << "Test" << LogExtra::Stacktrace()));
-  static_assert(noexcept(LOG_ERROR() << "Test" << LogExtra::Stacktrace()));
-  static_assert(noexcept(LOG_CRITICAL() << "Test" << LogExtra::Stacktrace()));
-  */
+    EXPECT_TRUE(noexcept(LOG_TRACE_TO(logging::GetNullLogger())));
+    EXPECT_TRUE(noexcept(LOG_DEBUG_TO(logging::GetNullLogger())));
+    EXPECT_TRUE(noexcept(LOG_INFO_TO(logging::GetNullLogger())));
+    EXPECT_TRUE(noexcept(LOG_WARNING_TO(logging::GetNullLogger())));
+    EXPECT_TRUE(noexcept(LOG_ERROR_TO(logging::GetNullLogger())));
+    EXPECT_TRUE(noexcept(LOG_CRITICAL_TO(logging::GetNullLogger())));
+
+    EXPECT_TRUE(noexcept(LOG_TRACE_TO(logging::GetNullLogger()) << "Test"));
+    EXPECT_TRUE(noexcept(LOG_DEBUG_TO(logging::GetNullLogger()) << "Test"));
+    EXPECT_TRUE(noexcept(LOG_INFO_TO(logging::GetNullLogger()) << "Test"));
+    EXPECT_TRUE(noexcept(LOG_WARNING_TO(logging::GetNullLogger()) << "Test"));
+    EXPECT_TRUE(noexcept(LOG_ERROR_TO(logging::GetNullLogger()) << "Test"));
+    EXPECT_TRUE(noexcept(LOG_CRITICAL_TO(logging::GetNullLogger()) << "Test"));
+
+    using logging::LogExtra;
+    EXPECT_TRUE(noexcept(LOG_TRACE_TO(logging::GetNullLogger())
+                         << LogExtra::Stacktrace()));
+    EXPECT_TRUE(noexcept(LOG_DEBUG_TO(logging::GetNullLogger())
+                         << LogExtra::Stacktrace()));
+    EXPECT_TRUE(noexcept(LOG_INFO_TO(logging::GetNullLogger())
+                         << LogExtra::Stacktrace()));
+    EXPECT_TRUE(noexcept(LOG_WARNING_TO(logging::GetNullLogger())
+                         << LogExtra::Stacktrace()));
+    EXPECT_TRUE(noexcept(LOG_ERROR_TO(logging::GetNullLogger())
+                         << LogExtra::Stacktrace()));
+    EXPECT_TRUE(noexcept(LOG_CRITICAL_TO(logging::GetNullLogger())
+                         << LogExtra::Stacktrace()));
+  }
 }
 
 USERVER_NAMESPACE_END

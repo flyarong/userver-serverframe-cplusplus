@@ -7,6 +7,8 @@ USERVER_NAMESPACE_BEGIN
 
 namespace storages::redis {
 
+SubscribeClient::~SubscribeClient() = default;
+
 SubscribeClientImpl::SubscribeClientImpl(
     std::shared_ptr<USERVER_NAMESPACE::redis::SubscribeSentinel>
         subscribe_sentinel)

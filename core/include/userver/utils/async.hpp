@@ -41,7 +41,7 @@ struct SpanWrapCall {
 
   struct Impl;
 
-  static constexpr std::size_t kImplSize = 4240;
+  static constexpr std::size_t kImplSize = 4256;
   static constexpr std::size_t kImplAlign = 8;
   utils::FastPimpl<Impl, kImplSize, kImplAlign> pimpl_;
 };
@@ -358,13 +358,13 @@ template <typename Function, typename... Args>
 ///
 /// ## Usage example
 /// Suppose you have some component that runs asynchronous tasks:
-/// @sample utils/async_test.cpp  AsyncBackground component
-/// @sample utils/async_test.cpp  AsyncBackground handler
+/// @snippet utils/async_test.cpp  AsyncBackground component
+/// @snippet utils/async_test.cpp  AsyncBackground handler
 ///
 /// If the tasks logically belong to the component itself (not to the method
 /// caller), then they should be launched using utils::AsyncBackground instead
 /// of the regular utils::Async
-/// @sample utils/async_test.cpp  AsyncBackground FooAsync
+/// @snippet utils/async_test.cpp  AsyncBackground FooAsync
 ///
 /// ## Arguments
 /// By default, arguments are copied or moved inside the resulting

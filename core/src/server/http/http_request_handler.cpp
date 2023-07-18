@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include <server/handlers/http_handler_base_statistics.hpp>
+#include <server/request/task_inherited_request_impl.hpp>
 #include <userver/components/statistics_storage.hpp>
 #include <userver/dynamic_config/storage/component.hpp>
 #include <userver/dynamic_config/value.hpp>
@@ -13,6 +14,8 @@
 #include <userver/logging/logger.hpp>
 #include <userver/server/http/http_request.hpp>
 #include <userver/server/http/http_response.hpp>
+#include <userver/server/request/task_inherited_request.hpp>
+#include <userver/utils/assert.hpp>
 #include "http_request_impl.hpp"
 
 USERVER_NAMESPACE_BEGIN
@@ -22,7 +25,10 @@ namespace {
 
 engine::TaskWithResult<void> StartFailsafeTask(
     std::shared_ptr<request::RequestBase> request) {
-  auto& http_request = dynamic_cast<http::HttpRequestImpl&>(*request);
+  UASSERT(dynamic_cast<http::HttpRequestImpl*>(&*request));
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+  auto& http_request = static_cast<http::HttpRequestImpl&>(*request);
+
   const auto* handler = http_request.GetHttpHandler();
   static handlers::HttpRequestStatistics dummy_statistics;
 
@@ -85,6 +91,12 @@ CcCustomStatus ParseRuntimeCfg(const dynamic_config::DocsMap& docs_map) {
 
 constexpr dynamic_config::Key<ParseRuntimeCfg> kCcCustomStatus{};
 
+bool ParseStreamApiEnabled(const dynamic_config::DocsMap& docs_map) {
+  return docs_map.Get("USERVER_HANDLER_STREAM_API_ENABLED").As<bool>();
+}
+
+constexpr dynamic_config::Key<ParseStreamApiEnabled> kStreamApiEnabled{};
+
 utils::statistics::MetricTag<std::atomic<size_t>> kCcStatusCodeIsCustom{
     "congestion-control.rps.is-custom-status-activated"};
 
@@ -92,8 +104,11 @@ utils::statistics::MetricTag<std::atomic<size_t>> kCcStatusCodeIsCustom{
 
 engine::TaskWithResult<void> HttpRequestHandler::StartRequestTask(
     std::shared_ptr<request::RequestBase> request) const {
+  UASSERT(dynamic_cast<http::HttpRequestImpl*>(&*request));
   const auto& http_request =
-      dynamic_cast<const http::HttpRequestImpl&>(*request);
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+      static_cast<const http::HttpRequestImpl&>(*request);
+
   auto& http_response = http_request.GetHttpResponse();
   http_response.SetHeader(USERVER_NAMESPACE::http::headers::kServer,
                           server_name_);
@@ -118,8 +133,8 @@ engine::TaskWithResult<void> HttpRequestHandler::StartRequestTask(
 
   if (throttling_enabled && http_response.IsLimitReached()) {
     SetThrottleReason(http_response, "Too many pending responses",
-                      USERVER_NAMESPACE::http::headers::ratelimit_reason::
-                          kMaxPendingResponses);
+                      std::string{USERVER_NAMESPACE::http::headers::
+                                      ratelimit_reason::kMaxPendingResponses});
 
     http_request.SetResponseStatus(HttpStatus::kTooManyRequests);
     http_request.GetHttpResponse().SetReady();
@@ -128,9 +143,9 @@ engine::TaskWithResult<void> HttpRequestHandler::StartRequestTask(
                            "limit via 'server.max_response_size_in_flight')";
     return StartFailsafeTask(std::move(request));
   }
+  const auto& config = config_source_.GetSnapshot();
 
   if (throttling_enabled && !rate_limit_.Obtain()) {
-    const auto& config = config_source_.GetSnapshot();
     auto config_var = config[kCcCustomStatus];
     const auto& delta = config_var.max_time_delta;
 
@@ -143,8 +158,9 @@ engine::TaskWithResult<void> HttpRequestHandler::StartRequestTask(
       metrics_->GetMetric(kCcStatusCodeIsCustom) = 0;
     }
 
-    SetThrottleReason(http_response, "congestion-control",
-                      USERVER_NAMESPACE::http::headers::ratelimit_reason::kCC);
+    SetThrottleReason(
+        http_response, "congestion-control",
+        std::string{USERVER_NAMESPACE::http::headers::ratelimit_reason::kCC});
 
     http_response.SetStatus(status);
     http_response.SetReady();
@@ -159,18 +175,22 @@ engine::TaskWithResult<void> HttpRequestHandler::StartRequestTask(
     return StartFailsafeTask(std::move(request));
   }
 
-  if (handler->GetConfig().response_body_stream) {
+  if (handler->GetConfig().response_body_stream && config[kStreamApiEnabled]) {
     http_response.SetStreamBody();
   }
 
   auto payload = [request = std::move(request), handler] {
+    server::request::kTaskInheritedRequest.Set(
+        std::static_pointer_cast<HttpRequestImpl>(request));
+
     request->SetTaskStartTime();
 
     request::RequestContext context;
     handler->HandleRequest(*request, context);
 
-    request->SetResponseNotifyTime();
-    request->GetResponse().SetReady();
+    const auto now = std::chrono::steady_clock::now();
+    request->SetResponseNotifyTime(now);
+    request->GetResponse().SetReady(now);
   };
 
   if (!is_monitor_ && throttling_enabled) {
@@ -180,13 +200,14 @@ engine::TaskWithResult<void> HttpRequestHandler::StartRequestTask(
   }
 }  // namespace http
 
-void HttpRequestHandler::DisableAddHandler() { add_handler_disabled_ = true; }
+void HttpRequestHandler::DisableAddHandler() {
+  const auto was_enabled = !add_handler_disabled_.exchange(true);
+  UASSERT(was_enabled);
+}
 
 void HttpRequestHandler::AddHandler(const handlers::HttpHandlerBase& handler,
                                     engine::TaskProcessor& task_processor) {
-  if (add_handler_disabled_) {
-    throw std::runtime_error("handler adding disabled");
-  }
+  UASSERT_MSG(!add_handler_disabled_, "handler adding disabled");
   if (is_monitor_ != handler.IsMonitor()) {
     throw std::runtime_error(
         std::string("adding ") + (handler.IsMonitor() ? "" : "non-") +
@@ -197,11 +218,14 @@ void HttpRequestHandler::AddHandler(const handlers::HttpHandlerBase& handler,
   handler_info_index_.AddHandler(handler, task_processor);
 }
 
+bool HttpRequestHandler::IsAddHandlerDisabled() const noexcept {
+  return add_handler_disabled_.load();
+}
+
 const HandlerInfoIndex& HttpRequestHandler::GetHandlerInfoIndex() const {
-  if (!add_handler_disabled_) {
-    throw std::runtime_error(
-        "handler adding must be disabled before GetHandlerInfoIndex() call");
-  }
+  UASSERT_MSG(
+      add_handler_disabled_,
+      "handler adding must be disabled before GetHandlerInfoIndex() call");
   return handler_info_index_;
 }
 

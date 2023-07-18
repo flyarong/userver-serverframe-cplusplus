@@ -23,28 +23,30 @@ class Client;
 
 namespace redis {
 
-#ifndef REDIS_ERR_TIMEOUT
-const int REDIS_ERR_TIMEOUT = 6;
-#endif
-
-const int REDIS_ERR_NOT_READY = 7;
-const int REDIS_ERR_MAX = REDIS_ERR_NOT_READY + 1;
-
 using Password = utils::NonLoggable<class PasswordTag, std::string>;
+
+enum class ConnectionSecurity { kNone, kTLS };
 
 struct ConnectionInfo {
   std::string host = "localhost";
   int port = 26379;
   Password password;
   bool read_only = false;
+  ConnectionSecurity connection_security = ConnectionSecurity::kNone;
+  using HostVector = std::vector<std::string>;
+  HostVector resolved_host{};
 
   ConnectionInfo() = default;
   ConnectionInfo(std::string host, int port, Password password,
-                 bool read_only = false)
+                 bool read_only = false,
+                 ConnectionSecurity security = ConnectionSecurity::kNone,
+                 HostVector resolved_host = {})
       : host{std::move(host)},
         port{port},
         password{std::move(password)},
-        read_only{read_only} {}
+        read_only{read_only},
+        connection_security(security),
+        resolved_host(std::move(resolved_host)) {}
 };
 
 struct Stat {
@@ -249,6 +251,41 @@ struct CommandsBufferingSettings {
 enum class ConnectionMode {
   kCommands,
   kSubscriber,
+};
+
+struct MetricsSettings {
+  bool timings_enabled{true};
+  bool command_timings_enabled{false};
+  bool request_sizes_enabled{false};
+  bool reply_sizes_enabled{false};
+
+  constexpr bool operator==(const MetricsSettings& rhs) const {
+    return timings_enabled == rhs.timings_enabled &&
+           command_timings_enabled == rhs.command_timings_enabled &&
+           request_sizes_enabled == rhs.request_sizes_enabled &&
+           reply_sizes_enabled == rhs.reply_sizes_enabled;
+  }
+
+  constexpr bool operator!=(const MetricsSettings& rhs) const {
+    return !(*this == rhs);
+  }
+};
+
+struct PubsubMetricsSettings {
+  bool per_shard_stats_enabled{true};
+
+  constexpr bool operator==(const PubsubMetricsSettings& rhs) const {
+    return per_shard_stats_enabled == rhs.per_shard_stats_enabled;
+  }
+
+  constexpr bool operator!=(const PubsubMetricsSettings& rhs) const {
+    return !(*this == rhs);
+  }
+};
+
+struct ReplicationMonitoringSettings {
+  bool enable_monitoring{false};
+  bool restrict_requests{false};
 };
 
 }  // namespace redis

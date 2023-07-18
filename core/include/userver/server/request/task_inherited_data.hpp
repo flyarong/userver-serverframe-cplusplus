@@ -16,10 +16,10 @@ namespace server::request {
 /// @brief Per-request data that should be available inside handlers
 struct TaskInheritedData final {
   /// The static path of the handler
-  const std::string* path{nullptr};
+  std::string_view path;
 
   /// The method of the request
-  const std::string& method;
+  std::string_view method;
 
   /// The time when the request started being handled
   std::chrono::steady_clock::time_point start_time{};
@@ -29,22 +29,36 @@ struct TaskInheritedData final {
 };
 
 /// @see TaskInheritedData for details on the contents.
+inline engine::TaskInheritedVariable<TaskInheritedData> kTaskInheritedData;
+
+/// @brief Returns TaskInheritedData::deadline, or an unreachable
+/// engine::Deadline if none was set.
+engine::Deadline GetTaskInheritedDeadline() noexcept;
+
+/// @brief Stops deadline propagation within its scope
 ///
-/// ## Stopping deadline propagation
+/// By default, handler deadline is honored in requests created directly
+/// from the handler task, as well as from its child tasks. However, some
+/// requests need to be completed regardless of whether the initial request
+/// timed out, because they are needed for something other than forming the
+/// upstream response.
 ///
-/// By default, deadline header is set for client requests created directly
-/// from the handler task, as well as from its child tasks. However, this
-/// behavior is highly undesirable for requests from background tasks, which
-/// should continue past the deadline of the originally handled request.
-///
-/// To cut off deadline propagation for such a background child task, call
-/// @code
-/// server::request::kTaskInheritedData.Erase()
-/// @endcode
-/// within the task.
+/// Deadline propagation is automatically blocked in tasks launched using:
+/// @see concurrent::BackgroundTaskStorage::AsyncDetach
+/// @see utils::AsyncBackground
 ///
 /// @see concurrent::BackgroundTaskStorage::AsyncDetach does it by default.
-inline engine::TaskInheritedVariable<TaskInheritedData> kTaskInheritedData;
+class [[nodiscard]] DeadlinePropagationBlocker final {
+ public:
+  DeadlinePropagationBlocker();
+
+  DeadlinePropagationBlocker(DeadlinePropagationBlocker&&) = delete;
+  DeadlinePropagationBlocker& operator=(DeadlinePropagationBlocker&&) = delete;
+  ~DeadlinePropagationBlocker();
+
+ private:
+  TaskInheritedData old_value_;
+};
 
 }  // namespace server::request
 

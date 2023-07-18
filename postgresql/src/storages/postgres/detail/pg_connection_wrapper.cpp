@@ -1,7 +1,8 @@
 #include <storages/postgres/detail/pg_connection_wrapper.hpp>
 
-#ifndef USERVER_NO_LIBPQ_PATCHES
 #include <pg_config.h>
+
+#ifndef USERVER_NO_LIBPQ_PATCHES
 #include <pq_portal_funcs.h>
 #include <pq_workaround.h>
 #else
@@ -9,13 +10,16 @@ auto PQXisBusy(PGconn* conn) { return ::PQisBusy(conn); }
 auto PQXgetResult(PGconn* conn) { return ::PQgetResult(conn); }
 #endif
 
+#include <userver/concurrent/background_task_storage.hpp>
 #include <userver/engine/task/cancel.hpp>
 #include <userver/logging/log.hpp>
 #include <userver/tracing/tags.hpp>
 #include <userver/utils/assert.hpp>
+#include <utils/impl/assert_extra.hpp>
 #include <utils/internal_tag.hpp>
 #include <utils/strerror.hpp>
 
+#include <storages/postgres/detail/cancel.hpp>
 #include <storages/postgres/detail/pg_message_severity.hpp>
 #include <storages/postgres/detail/tracing_tags.hpp>
 #include <userver/storages/postgres/dsn.hpp>
@@ -48,10 +52,6 @@ namespace storages::postgres::detail {
 
 namespace {
 
-/// Size of error message buffer for PQcancel
-/// 256 bytes is recommended in libpq documentation
-/// https://www.postgresql.org/docs/12/static/libpq-cancel.html
-constexpr int kErrBufferSize = 256;
 // TODO move to config
 constexpr bool kVerboseErrors = false;
 
@@ -105,17 +105,21 @@ void NoticeReceiver(void* conn_wrapper_ptr, PGresult const* pg_res) {
 
 }  // namespace
 
-PGConnectionWrapper::PGConnectionWrapper(engine::TaskProcessor& tp, uint32_t id,
-                                         SizeGuard&& size_guard)
+PGConnectionWrapper::PGConnectionWrapper(
+    engine::TaskProcessor& tp, concurrent::BackgroundTaskStorageCore& bts,
+    uint32_t id, engine::SemaphoreLock&& pool_size_lock)
     : bg_task_processor_{tp},
+      bg_task_storage_{bts},
       log_extra_{{tracing::kDatabaseType, tracing::kDatabasePostgresType},
                  {"pg_conn_id", id}},
-      size_guard_{std::move(size_guard)},
+      pool_size_lock_{std::move(pool_size_lock)},
       last_use_{std::chrono::steady_clock::now()} {
   // TODO add SSL initialization
 }
 
-PGConnectionWrapper::~PGConnectionWrapper() { Close().Detach(); }
+PGConnectionWrapper::~PGConnectionWrapper() {
+  bg_task_storage_.Detach(Close());
+}
 
 template <typename ExceptionType>
 void PGConnectionWrapper::CheckError(const std::string& cmd,
@@ -125,12 +129,27 @@ void PGConnectionWrapper::CheckError(const std::string& cmd,
       "or the server configuration";
 
   if (pg_dispatch_result == 0) {
+    HandleSocketPostClose();
     auto* msg = PQerrorMessage(conn_);
     PGCW_LOG_WARNING() << "libpq " << cmd << " error: " << msg
                        << (std::is_base_of_v<ConnectionError, ExceptionType>
                                ? kCheckConnectionQuota
                                : "");
     throw ExceptionType(cmd + " execution error: " + msg);
+  }
+}
+
+void PGConnectionWrapper::HandleSocketPostClose() {
+  auto fd = PQsocket(conn_);
+  if (fd < 0) {
+    /*
+     * Don't use the result, fd is invalid anyway. As fd is invalid,
+     * we have to guarantee that we are not waiting for it.
+     */
+    auto fd_invalid = std::move(socket_).Release();
+    if (fd_invalid >= 0) {
+      LOG_DEBUG() << "Socket is closed by libpq";
+    }
   }
 }
 
@@ -177,7 +196,7 @@ engine::Task PGConnectionWrapper::Close() {
   return engine::CriticalAsyncNoSpan(
       bg_task_processor_,
       [tmp_conn, socket = std::move(tmp_sock), is_broken = is_broken_,
-       sg = std::move(size_guard_)]() mutable {
+       sl = std::move(pool_size_lock_)]() mutable {
         int fd = -1;
         if (socket) {
           fd = std::move(socket).Release();
@@ -225,15 +244,16 @@ engine::Task PGConnectionWrapper::Cancel() {
   PGCW_LOG_DEBUG() << "Cancel current request";
   std::unique_ptr<PGcancel, decltype(&PQfreeCancel)> cancel{PQgetCancel(conn_),
                                                             &PQfreeCancel};
+
   // NOLINTNEXTLINE(cppcoreguidelines-slicing)
-  return engine::AsyncNoSpan(
-      bg_task_processor_, [this, cancel = std::move(cancel)] {
-        std::array<char, kErrBufferSize> buffer{};
-        if (!PQcancel(cancel.get(), buffer.data(), buffer.size())) {
-          PGCW_LOG_LIMITED_WARNING() << "Failed to cancel current request";
-          // TODO Throw exception or not?
-        }
-      });
+  return engine::AsyncNoSpan([this, cancel = std::move(cancel)] {
+    try {
+      detail::Cancel(cancel.get(),
+                     engine::Deadline::FromDuration(std::chrono::seconds(5)));
+    } catch (const std::exception& e) {
+      PGCW_LOG_LIMITED_WARNING() << "Failed to cancel current request";
+    }
+  });
 }
 
 void PGConnectionWrapper::AsyncConnect(const Dsn& dsn, Deadline deadline,
@@ -339,10 +359,11 @@ void PGConnectionWrapper::WaitConnectionFinish(Deadline deadline,
         break;
     }
 
-    // PQconnectPoll() may accesss /tmp/krb5cc* files
+    // PQconnectPoll() may access /tmp/krb5cc* files
     poll_res = engine::CriticalAsyncNoSpan(bg_task_processor_, [this] {
                  return PQconnectPoll(conn_);
                }).Get();
+    HandleSocketPostClose();
 
     PGCW_LOG_TRACE() << MsgForStatus(PQstatus(conn_));
 
@@ -354,6 +375,7 @@ void PGConnectionWrapper::WaitConnectionFinish(Deadline deadline,
 
   // fe-exec.c: Needs to be called only on a connected database connection.
   if (PQsetnonblocking(conn_, 1)) {
+    HandleSocketPostClose();
     PGCW_LOG_LIMITED_ERROR()
         << "libpq failed to set non-blocking connection mode";
     throw ConnectionFailed{dsn, "Failed to set non-blocking connection mode"};
@@ -401,22 +423,26 @@ void PGConnectionWrapper::RefreshSocket(const Dsn& dsn) {
 }
 
 bool PGConnectionWrapper::WaitSocketReadable(Deadline deadline) {
+  if (!socket_.IsValid()) return false;
   return socket_.WaitReadable(deadline);
 }
 
 bool PGConnectionWrapper::WaitSocketWriteable(Deadline deadline) {
+  if (!socket_.IsValid()) return false;
   return socket_.WaitWriteable(deadline);
 }
 
 void PGConnectionWrapper::Flush(Deadline deadline) {
 #if LIBPQ_HAS_PIPELINING
   if (PQpipelineStatus(conn_) != PQ_PIPELINE_OFF) {
+    HandleSocketPostClose();
     CheckError<CommandError>("PQpipelineSync", PQpipelineSync(conn_));
     is_syncing_pipeline_ = true;
   }
 #endif
   while (const int flush_res = PQflush(conn_)) {
     if (flush_res < 0) {
+      HandleSocketPostClose();
       throw CommandError(PQerrorMessage(conn_));
     }
     if (!WaitSocketWriteable(deadline)) {
@@ -433,7 +459,11 @@ void PGConnectionWrapper::Flush(Deadline deadline) {
 
 bool PGConnectionWrapper::TryConsumeInput(Deadline deadline) {
   while (PQXisBusy(conn_)) {
+    HandleSocketPostClose();
     if (!WaitSocketReadable(deadline)) {
+      LOG_DEBUG() << "Socket " << socket_.Fd()
+                  << " has not become readable in TryConsumeInput due to "
+                  << (socket_.IsValid() ? "timeout" : "closed fd");
       return false;
     }
     CheckError<CommandError>("PQconsumeInput", PQconsumeInput(conn_));
@@ -458,16 +488,16 @@ ResultSet PGConnectionWrapper::WaitResult(Deadline deadline,
   scope.Reset(scopes::kLibpqWaitResult);
   Flush(deadline);
   auto handle = MakeResultHandle(nullptr);
-  ConsumeInput(deadline);
+  auto null_res_counter{0};
   do {
-    while (auto* pg_res = PQXgetResult(conn_)) {
+    while (auto* pg_res = ReadResult(deadline)) {
+      null_res_counter = 0;
       if (handle && !is_syncing_pipeline_) {
         // TODO Decide about the severity of this situation
         PGCW_LOG_LIMITED_INFO()
             << "Query returned several result sets, a result set is discarded";
       }
       auto next_handle = MakeResultHandle(pg_res);
-      ConsumeInput(deadline);
 #if LIBPQ_HAS_PIPELINING
       if (is_syncing_pipeline_) {
         switch (PQresultStatus(next_handle.get())) {
@@ -483,18 +513,27 @@ ResultSet PGConnectionWrapper::WaitResult(Deadline deadline,
 #endif
       handle = std::move(next_handle);
     }
+    // There is an issue with libpq when db shuts down we may receive an error
+    // instead of PGRES_PIPELINE_SYNC and never get out of this cycle, hence
+    // this counter.
+    if (++null_res_counter > 2) {
+      MarkAsBroken();
+      if (!handle) throw RuntimeError{"Empty result"};
+      is_syncing_pipeline_ = false;
+    }
   } while (is_syncing_pipeline_ && PQstatus(conn_) != CONNECTION_BAD);
+
   return MakeResult(std::move(handle));
 }
 
 void PGConnectionWrapper::DiscardInput(Deadline deadline) {
   Flush(deadline);
   auto handle = MakeResultHandle(nullptr);
-  ConsumeInput(deadline);
+  auto null_res_counter{0};
   do {
-    while (auto* pg_res = PQXgetResult(conn_)) {
+    while (auto* pg_res = ReadResult(deadline)) {
+      null_res_counter = 0;
       handle = MakeResultHandle(pg_res);
-      ConsumeInput(deadline);
 #if LIBPQ_HAS_PIPELINING
       if (is_syncing_pipeline_ &&
           PQresultStatus(handle.get()) == PGRES_PIPELINE_SYNC) {
@@ -502,11 +541,21 @@ void PGConnectionWrapper::DiscardInput(Deadline deadline) {
       }
 #endif
     }
-  } while (is_syncing_pipeline_);
+    // Same issue as with WaitResult
+    if (++null_res_counter > 2) {
+      MarkAsBroken();
+      is_syncing_pipeline_ = false;
+    }
+  } while (is_syncing_pipeline_ && PQstatus(conn_) != CONNECTION_BAD);
 }
 
 void PGConnectionWrapper::FillSpanTags(tracing::Span& span) const {
   span.AddTags(log_extra_, USERVER_NAMESPACE::utils::InternalTag{});
+}
+
+PGresult* PGConnectionWrapper::ReadResult(Deadline deadline) {
+  ConsumeInput(deadline);
+  return PQXgetResult(conn_);
 }
 
 ResultSet PGConnectionWrapper::MakeResult(ResultHandle&& handle) {
@@ -574,11 +623,12 @@ ResultSet PGConnectionWrapper::MakeResult(ResultHandle&& handle) {
     case PGRES_FATAL_ERROR: {
       Message msg{wrapper};
       if (!IsWhitelistedState(msg.GetSqlState())) {
-        PGCW_LOG_LIMITED_ERROR()
-            << "Fatal error occured: " << msg.GetMessage() << msg.GetLogExtra();
+        PGCW_LOG_LIMITED_ERROR() << "Fatal error occurred: " << msg.GetMessage()
+                                 << msg.GetLogExtra();
       } else {
         PGCW_LOG_LIMITED_WARNING()
-            << "Fatal error occured: " << msg.GetMessage() << msg.GetLogExtra();
+            << "Fatal error occurred: " << msg.GetMessage()
+            << msg.GetLogExtra();
       }
       LOG_DEBUG() << "Ready to throw";
       msg.ThrowException();
@@ -746,6 +796,16 @@ TimeoutDuration PGConnectionWrapper::GetIdleDuration() const {
 }
 
 void PGConnectionWrapper::MarkAsBroken() { is_broken_ = true; }
+
+bool PGConnectionWrapper::IsBroken() const { return is_broken_; }
+
+bool PGConnectionWrapper::IsInAbortedPipeline() const {
+#if LIBPQ_HAS_PIPELINING
+  return PQpipelineStatus(conn_) == PGpipelineStatus::PQ_PIPELINE_ABORTED;
+#else
+  return false;
+#endif
+}
 
 }  // namespace storages::postgres::detail
 
