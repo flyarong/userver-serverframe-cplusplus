@@ -3,8 +3,13 @@ Plugin that imports the required fixtures to start the database
 and adjusts the PostgreSQL "dbconnection" static config value.
 """
 
+from contextlib import contextmanager
+from enum import Enum
+import typing
+
 import pytest
 
+from pytest_userver import sql
 
 pytest_plugins = [
     'testsuite.databases.pgsql.pytest_plugin',
@@ -13,6 +18,55 @@ pytest_plugins = [
 
 
 USERVER_CONFIG_HOOKS = ['userver_pg_config']
+
+
+class RegisteredNtrxFailureType(Enum):
+    Error = 1
+    LogicError = 2
+    RuntimeError = 3
+    ConnectionError = 4
+
+
+class RegisteredNtrx:
+    def __init__(self, testpoint):
+        self._registered_ntrx = dict()
+        self._testpoint = testpoint
+
+    def _enable_failure(
+        self,
+        name: str,
+        failure_type: RegisteredNtrxFailureType,
+    ) -> None:
+        self._registered_ntrx[name] = failure_type
+
+        @self._testpoint(f'pg_ntrx_execute::{name}')
+        def _failure_tp(data):
+            return {
+                'inject_failure': self.is_failure_enabled(name),
+                'failure_type': self._get_failure_type(name).name,
+            }
+
+    def _disable_failure(self, name: str) -> None:
+        if self.is_failure_enabled(name):
+            del self._registered_ntrx[name]
+
+    def _get_failure_type(self, name: str) -> RegisteredNtrxFailureType:
+        return self._registered_ntrx[name]
+
+    def is_failure_enabled(self, name: str) -> bool:
+        return name in self._registered_ntrx
+
+    @contextmanager
+    def mock_failure(
+        self,
+        name: str,
+        failure_type: RegisteredNtrxFailureType = RegisteredNtrxFailureType.Error,
+    ):
+        self._enable_failure(name, failure_type)
+        try:
+            yield
+        finally:
+            self._disable_failure(name)
 
 
 @pytest.fixture(scope='session')
@@ -28,8 +82,7 @@ def userver_pg_config(pgsql_local):
 
     if not pgsql_local:
         raise ValueError(
-            'Override the "pgsql_local" fixture so that testsuite knowns how '
-            'to start the PostgreSQL database',
+            'Override the "pgsql_local" fixture so that testsuite knowns how to start the PostgreSQL database',
         )
 
     if len(pgsql_local) > 1:
@@ -50,7 +103,7 @@ def userver_pg_config(pgsql_local):
         postgre_dbs = {
             name: params
             for name, params in components.items()
-            if params and 'dbconnection' in params
+            if params and ('dbconnection' in params or 'dbconnection#env' in params)
         }
 
         if len(postgre_dbs) > 1:
@@ -67,3 +120,44 @@ def userver_pg_config(pgsql_local):
             config.pop('dbalias', None)
 
     return _patch_config
+
+
+@pytest.fixture
+def userver_pg_trx(
+    testpoint,
+) -> typing.Generator[sql.RegisteredTrx, None, None]:
+    """
+    The fixture maintains transaction fault injection state using
+    RegisteredTrx class.
+
+    @see pytest_userver.sql.RegisteredTrx
+
+    @snippet postgresql/functional_tests/integration_tests/tests/test_trx_failure.py  fault injection
+
+    @ingroup userver_testsuite_fixtures
+    """  # noqa: E501
+
+    registered = sql.RegisteredTrx()
+
+    @testpoint('pg_trx_commit')
+    def _pg_trx_tp(data):
+        should_fail = registered.is_failure_enabled(data['trx_name'])
+        return {'trx_should_fail': should_fail}
+
+    yield registered
+
+
+@pytest.fixture
+def userver_pg_ntrx(testpoint) -> typing.Generator[RegisteredNtrx, None, None]:
+    """
+    The fixture maintains single query fault injection state using
+    RegisteredNtrx class.
+
+    @see pytest_userver.plugins.postgresql.RegisteredNtrx
+
+    @snippet postgresql/functional_tests/integration_tests/tests/test_ntrx_failure.py  fault injection
+
+    @ingroup userver_testsuite_fixtures
+    """  # noqa: E501
+
+    yield RegisteredNtrx(testpoint)

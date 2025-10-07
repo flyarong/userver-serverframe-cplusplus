@@ -2,13 +2,17 @@
 
 #include <fmt/format.h>
 
+#include <components/component_list_test.hpp>
+#include <userver/compiler/impl/tsan.hpp>
 #include <userver/components/common_component_list.hpp>
 #include <userver/components/run.hpp>
+#include <userver/dynamic_config/test_helpers.hpp>
+#include <userver/engine/run_standalone.hpp>
 #include <userver/fs/blocking/temp_directory.hpp>  // for fs::blocking::TempDirectory
-#include <userver/fs/blocking/write.hpp>  // for fs::blocking::RewriteFileContents
+#include <userver/fs/blocking/write.hpp>           // for fs::blocking::RewriteFileContents
+#include <userver/internal/net/net_listener.hpp>
+#include <userver/logging/impl/mem_logger.hpp>
 #include <userver/server/handlers/ping.hpp>
-
-#include <components/component_list_test.hpp>
 #include <userver/utest/utest.hpp>
 
 USERVER_NAMESPACE_BEGIN
@@ -17,12 +21,16 @@ namespace {
 
 constexpr std::string_view kConfigVarsTemplate = R"(
   userver-dumps-root: {0}
-  runtime_config_path: {1}
+  dynamic-config-cache-path: {1}
   log_level: {2}
   file_path: {3}
   overflow_behavior: {4}
+  server-port: {5}
+  server-monitor-port: {6}
 )";
 
+// We deliberately have some defaulted options explicitly specified here, for
+// testing and documentation purposes.
 // BEWARE! No separate fs-task-processor. Testing almost single thread mode
 constexpr std::string_view kStaticConfig = R"(
 components_manager:
@@ -30,6 +38,7 @@ components_manager:
     initial_size: 50
     max_size: 500
   default_task_processor: main-task-processor
+  fs_task_processor: main-task-processor
   event_thread_pool:
     threads: 4
   task_processors:
@@ -54,17 +63,18 @@ components_manager:
     statistics-storage:
       # Nothing
     dynamic-config:
-      fs-cache-path: $runtime_config_path
+      updates-enabled: true
+      fs-cache-path: $dynamic-config-cache-path
       fs-task-processor: main-task-processor
     server:
       listener:
-          port: 8087
+          port: $server-port
           task_processor: main-task-processor
       listener-monitor:
           connection:
               in_buffer_size: 32768
               requests_queue_size_threshold: 100
-          port: 8088
+          port: $server-monitor-port
           port#fallback: 1188
           task_processor: monitor-task-processor
     auth-checker-settings:
@@ -85,8 +95,6 @@ components_manager:
       testsuite-enabled: true
       testsuite-timeout: 5s
       testsuite-allowed-url-prefixes: ['http://localhost:8083/', 'http://localhost:8084/']
-    dns-client:
-      fs-task-processor: main-task-processor
     dynamic-config-client:
       get-configs-overrides-for-service: true
       service-name: common_component_list-service
@@ -94,20 +102,13 @@ components_manager:
       http-retries: 5
       config-url: http://localhost:8083/
     dynamic-config-client-updater:
-      store-enabled: true
-      load-only-my-values: true
-      fallback-path: $runtime_config_path
-      fallback-path#fallback: /some/path/to/runtime_config.json
-
-      # options from components::CachingComponentBase
       update-types: full-and-incremental
       update-interval: 5s
       update-jitter: 2s
       full-update-interval: 5m
-      first-update-fail-ok: false
-      config-settings: true
+      config-settings: false
       additional-cleanup-interval: 5m
-      testsuite-force-periodic-update: true
+      first-update-fail-ok: true
     tracer:
         service-name: config-service
     statistics-storage:
@@ -174,7 +175,6 @@ components_manager:
         method: GET,PUT
         task_processor: monitor-task-processor
 # /// [Sample handler log level component config]
-# /// [Sample handler inspect requests component config]
 # yaml
     handler-on-log-rotate:
         path: /service/on-log-rotate/
@@ -212,12 +212,13 @@ components_manager:
 # /// [Sample handler server monitor component config]
 # yaml
     handler-server-monitor:
-        path: /*
+        path: /statistics
         method: GET
         task_processor: monitor-task-processor
         common-labels:
             application: sample application
             zone: some
+        format: json
 # /// [Sample handler server monitor component config]
 # /// [Sample handler dynamic debug log component config]
     handler-dynamic-debug-log:
@@ -227,97 +228,172 @@ components_manager:
 # /// [Sample handler dynamic debug log component config]
 config_vars: )";
 
+struct ServicePorts final {
+    std::uint16_t server_port{0};
+    std::uint16_t monitor_port{0};
+};
+
+ServicePorts FindFreePorts() {
+    ServicePorts ports;
+    engine::RunStandalone([&ports] {
+        const internal::net::TcpListener listener1;
+        const internal::net::TcpListener listener2;
+        ports = {listener1.Port(), listener2.Port()};
+    });
+    return ports;
+}
+
+class CommonServerComponentList : public ComponentList {
+protected:
+    CommonServerComponentList() {
+        fs::blocking::RewriteFileContents(
+            GetDynamicConfigCachePath(), formats::json::ToString(dynamic_config::impl::GetDefaultDocsMap().AsJson())
+        );
+    }
+
+    std::string GetDynamicConfigCachePath() const { return temp_root_.GetPath() + "/config_cache.json"; }
+
+    std::string GetConfigVarsPath() const { return temp_root_.GetPath() + "/config_vars.json"; }
+
+    std::string GetDumpsRoot() const { return temp_root_.GetPath(); }
+
+    std::string GetLogsPath() const { return temp_root_.GetPath() + "/logs.txt"; }
+
+    ServicePorts GetPorts() const { return ports_; }
+
+private:
+    const fs::blocking::TempDirectory temp_root_{fs::blocking::TempDirectory::Create()};
+    const ServicePorts ports_ = FindFreePorts();
+};
+
 }  // namespace
 
-TEST_F(ComponentList, ServerCommon) {
-  const auto temp_root = fs::blocking::TempDirectory::Create();
-  const std::string runtime_config_path =
-      temp_root.GetPath() + "/runtime_config.json";
-  const std::string config_vars_path =
-      temp_root.GetPath() + "/config_vars.json";
+TEST_F(CommonServerComponentList, Smoke) {
+    fs::blocking::RewriteFileContents(
+        GetConfigVarsPath(),
+        fmt::format(
+            kConfigVarsTemplate,
+            GetDumpsRoot(),
+            GetDynamicConfigCachePath(),
+            "warning",
+            "'@null'",
+            "discard",
+            GetPorts().server_port,
+            GetPorts().monitor_port
+        )
+    );
 
-  fs::blocking::RewriteFileContents(runtime_config_path,
-                                    tests::GetRuntimeConfig());
-  fs::blocking::RewriteFileContents(
-      config_vars_path,
-      fmt::format(kConfigVarsTemplate, temp_root.GetPath(), runtime_config_path,
-                  "warning", "'@null'", "discard"));
-
-  components::RunOnce(
-      components::InMemoryConfig{std::string{kStaticConfig} + config_vars_path},
-      components::CommonComponentList()
-          .AppendComponentList(components::CommonServerComponentList())
-          .Append<server::handlers::Ping>(),
-      "@null");
+    components::RunOnce(
+        components::InMemoryConfig{std::string{kStaticConfig} + GetConfigVarsPath()},
+        components::CommonComponentList()
+            .AppendComponentList(components::CommonServerComponentList())
+            .Append<server::handlers::Ping>()
+    );
 }
 
-TEST_F(ComponentList, ServerTraceLogging) {
-  const auto temp_root = fs::blocking::TempDirectory::Create();
-  const std::string runtime_config_path =
-      temp_root.GetPath() + "/runtime_config.json";
-  const std::string config_vars_path =
-      temp_root.GetPath() + "/config_vars.json";
-  const std::string logs_file = temp_root.GetPath() + "/logs.txt";
+#if !USERVER_IMPL_HAS_TSAN
+TEST_F(CommonServerComponentList, Logger) {
+    auto& old_logger = logging::GetDefaultLogger();
+    logging::impl::SetDefaultLoggerRef(logging::impl::MemLogger::GetMemLogger());
 
-  fs::blocking::RewriteFileContents(runtime_config_path,
-                                    tests::GetRuntimeConfig());
-  fs::blocking::RewriteFileContents(
-      config_vars_path,
-      fmt::format(kConfigVarsTemplate, temp_root.GetPath(), runtime_config_path,
-                  "trace", logs_file, "discard"));
+    fs::blocking::RewriteFileContents(
+        GetConfigVarsPath(),
+        fmt::format(
+            kConfigVarsTemplate,
+            GetDumpsRoot(),
+            GetDynamicConfigCachePath(),
+            "warning",
+            "'@null'",
+            "discard",
+            GetPorts().server_port,
+            GetPorts().monitor_port
+        )
+    );
 
-  components::RunOnce(
-      components::InMemoryConfig{std::string{kStaticConfig} + config_vars_path},
-      components::CommonComponentList()
-          .AppendComponentList(components::CommonServerComponentList())
-          .Append<server::handlers::Ping>(),
-      logs_file);
+    components::RunOnce(
+        components::InMemoryConfig{std::string{kStaticConfig} + GetConfigVarsPath()},
+        components::CommonComponentList()
+            .AppendComponentList(components::CommonServerComponentList())
+            .Append<server::handlers::Ping>()
+    );
+
+    logging::SetDefaultLoggerLevel(logging::Level::kInfo);
+    LOG_CRITICAL() << "some text";
+
+    logging::impl::SetDefaultLoggerRef(old_logger);
+
+    // To avoid "some text" log in the terminal.
+    logging::impl::MemLogger::GetMemLogger().ForwardTo(&old_logger);
+    logging::impl::MemLogger::GetMemLogger().ForwardTo(nullptr);
+}
+#endif
+
+TEST_F(CommonServerComponentList, TraceLogging) {
+    fs::blocking::RewriteFileContents(
+        GetConfigVarsPath(),
+        fmt::format(
+            kConfigVarsTemplate,
+            GetDumpsRoot(),
+            GetDynamicConfigCachePath(),
+            "trace",
+            GetLogsPath(),
+            "discard",
+            GetPorts().server_port,
+            GetPorts().monitor_port
+        )
+    );
+
+    components::RunOnce(
+        components::InMemoryConfig{std::string{kStaticConfig} + GetConfigVarsPath()},
+        components::CommonComponentList()
+            .AppendComponentList(components::CommonServerComponentList())
+            .Append<server::handlers::Ping>()
+    );
 }
 
-TEST_F(ComponentList, ServerNullLogging) {
-  const auto temp_root = fs::blocking::TempDirectory::Create();
-  const std::string runtime_config_path =
-      temp_root.GetPath() + "/runtime_config.json";
-  const std::string config_vars_path =
-      temp_root.GetPath() + "/config_vars.json";
+TEST_F(CommonServerComponentList, NullLogging) {
+    fs::blocking::RewriteFileContents(
+        GetConfigVarsPath(),
+        fmt::format(
+            kConfigVarsTemplate,
+            GetDumpsRoot(),
+            GetDynamicConfigCachePath(),
+            "trace",
+            "'@null'",
+            "discard",
+            GetPorts().server_port,
+            GetPorts().monitor_port
+        )
+    );
 
-  fs::blocking::RewriteFileContents(runtime_config_path,
-                                    tests::GetRuntimeConfig());
-  fs::blocking::RewriteFileContents(
-      config_vars_path,
-      fmt::format(kConfigVarsTemplate, temp_root.GetPath(), runtime_config_path,
-                  "trace", "'@null'", "discard"));
-
-  components::RunOnce(
-      components::InMemoryConfig{std::string{kStaticConfig} + config_vars_path},
-      components::CommonComponentList()
-          .AppendComponentList(components::CommonServerComponentList())
-          .Append<server::handlers::Ping>(),
-      "@null");
+    components::RunOnce(
+        components::InMemoryConfig{std::string{kStaticConfig} + GetConfigVarsPath()},
+        components::CommonComponentList()
+            .AppendComponentList(components::CommonServerComponentList())
+            .Append<server::handlers::Ping>()
+    );
 }
 
-TEST_F(ComponentList, BlockingDefaultLogger) {
-  const auto temp_root = fs::blocking::TempDirectory::Create();
-  const std::string runtime_config_path =
-      temp_root.GetPath() + "/runtime_config.json";
-  const std::string config_vars_path =
-      temp_root.GetPath() + "/config_vars.json";
+TEST_F(CommonServerComponentList, BlockingDefaultLogger) {
+    fs::blocking::RewriteFileContents(
+        GetConfigVarsPath(),
+        fmt::format(
+            kConfigVarsTemplate,
+            GetDumpsRoot(),
+            GetDynamicConfigCachePath(),
+            "warning",
+            "'@null'",
+            "block",
+            GetPorts().server_port,
+            GetPorts().monitor_port
+        )
+    );
 
-  fs::blocking::RewriteFileContents(runtime_config_path,
-                                    tests::GetRuntimeConfig());
-  fs::blocking::RewriteFileContents(
-      config_vars_path,
-      fmt::format(kConfigVarsTemplate, temp_root.GetPath(), runtime_config_path,
-                  "warning", "'@null'", "block"));
-
-  const components::InMemoryConfig config{std::string{kStaticConfig} +
-                                          config_vars_path};
-  const auto component_list =
-      components::CommonComponentList()
-          .AppendComponentList(components::CommonServerComponentList())
-          .Append<server::handlers::Ping>();
-  UEXPECT_THROW_MSG(components::RunOnce(config, component_list, "@null"),
-                    std::exception, "efault logger");
+    const components::InMemoryConfig config{std::string{kStaticConfig} + GetConfigVarsPath()};
+    const auto component_list = components::CommonComponentList()
+                                    .AppendComponentList(components::CommonServerComponentList())
+                                    .Append<server::handlers::Ping>();
+    UEXPECT_THROW_MSG(components::RunOnce(config, component_list), std::exception, "efault logger");
 }
 
 USERVER_NAMESPACE_END

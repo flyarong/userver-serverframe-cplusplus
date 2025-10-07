@@ -62,29 +62,19 @@ components_manager:
             method: GET
             task_processor: main-task-processor
 
-        tracer:
-            service-name: postgres-basic-chaos
-
         dynamic-config:
-            fs-cache-path: ''
-        dynamic-config-fallbacks:
-            fallback-path: /etc/postgres_basic_chaos/dynamic_config_fallback.json
+            defaults:
+                POSTGRES_STATEMENT_METRICS_SETTINGS:
+                    key-value-database:
+                        max_statement_metrics: 5
+
         dns-client:
             fs-task-processor: fs-task-processor
-    coro_pool:
-        initial_size: 500
-        max_size: 1000
 
     task_processors:
         main-task-processor:
             worker_threads: 4
-            thread_name: main-worker
-
         fs-task-processor:
-            thread_name: fs-worker
             worker_threads: 4
 
     default_task_processor: main-task-processor
-
-userver_experiments:
-  - pg-connection-pipeline-enabled

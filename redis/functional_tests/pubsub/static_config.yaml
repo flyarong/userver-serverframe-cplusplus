@@ -5,13 +5,31 @@ components_manager:
             db: redis-sentinel
             path: /redis-sentinel
             task_processor: main-task-processor
-            method: GET,DELETE
+            method: GET,DELETE,PUT
+
+        handler-sentinel-with-master:
+            db: redis-sentinel-with-master
+            path: /redis-sentinel-with-master
+            task_processor: main-task-processor
+            method: GET,DELETE,PUT
 
         handler-cluster:
             db: redis-cluster
             path: /redis-cluster
             task_processor: main-task-processor
+            method: GET,DELETE,PUT
+
+        handler-standalone:
+            db: redis-standalone
+            path: /redis-standalone
+            task_processor: main-task-processor
+            method: GET,DELETE,PUT
+
+        handler-many-subscriptions:
+            path: /many-subscriptions
+            task_processor: main-task-processor
             method: GET,DELETE
+            db: redis-cluster
 
         key-value-database:
             groups: []
@@ -21,6 +39,12 @@ components_manager:
               - config_name: redis-cluster
                 db: redis-cluster
                 sharding_strategy: RedisCluster
+              - config_name: redis-sentinel
+                db: redis-sentinel-with-master
+                allow_reads_from_master: true
+              - config_name: redis-standalone
+                db: redis-standalone
+                sharding_strategy: RedisStandalone
             thread_pools:
                 redis_thread_pool_size: 2
                 sentinel_thread_pool_size: 1
@@ -57,26 +81,13 @@ components_manager:
                     level: debug
                     overflow_behavior: discard
 
-        tracer:
-            service-name: redis-basic-chaos
-
-        dynamic-config:
-            fs-cache-path: ''
-        dynamic-config-fallbacks:
-            fallback-path: /etc/redis_basic_chaos/dynamic_config_fallback.json
         dns-client:
             fs-task-processor: fs-task-processor
-    coro_pool:
-        initial_size: 500
-        max_size: 1000
 
     task_processors:
         main-task-processor:
             worker_threads: 4
-            thread_name: main-worker
-
         fs-task-processor:
-            thread_name: fs-worker
             worker_threads: 4
 
     default_task_processor: main-task-processor

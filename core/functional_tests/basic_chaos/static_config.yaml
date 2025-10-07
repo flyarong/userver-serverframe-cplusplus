@@ -17,11 +17,24 @@ components_manager:
             task_processor: main-task-processor
             method: GET,DELETE,POST
 
+        handler-chaos-httpserver-parse-body-args:
+            path: /chaos/httpserver-parse-body-args
+            parse_args_from_body: true
+            task_processor: main-task-processor
+            method: GET,DELETE,POST
+
+        handler-chaos-httpserver-with-exception:
+            path: /chaos/httpserver-with-exception
+            task_processor: main-task-processor
+            method: GET
+
         handler-chaos-dns-resolver:
             path: /chaos/resolver
             task_processor: main-task-processor
             method: GET,DELETE,POST
-            dns-server: 127.0.0.1:123
+            dns-servers:
+              - 127.0.0.1:123
+              - 127.0.0.1:456
             hosts-file: /etc/hosts
             cache-max-ttl: 99999
             cache-failure-ttl: 99999
@@ -31,6 +44,16 @@ components_manager:
             path: /service/monitor
             method: GET
             task_processor: main-task-processor
+
+        handler-on-log-rotate:
+            path: /service/on-log-rotate/
+            method: POST
+            task_processor: monitor-task-processor
+
+        handler-dynamic-debug-log:
+            path: /log/dynamic-debug
+            method: GET,PUT,DELETE
+            task_processor: monitor-task-processor
 
         testsuite-support:
 
@@ -52,26 +75,36 @@ components_manager:
 
         server:
             listener:
+                address: '::'
                 port: 8187
                 task_processor: main-task-processor
+                handler-defaults:
+                    deadline_expired_status_code: 504
             listener-monitor:
                 port: 8188
                 task_processor: main-task-processor
+
+# /// [logging]
         logging:
             fs-task-processor: fs-task-processor
             loggers:
                 default:
                     file_path: '@stderr'
-                    level: debug
-                    overflow_behavior: discard
-
-        tracer:
-            service-name: postgres-basic-chaos
+                    level: info
+# /// [logging]
 
         dynamic-config:
-            fs-cache-path: ''
-        dynamic-config-fallbacks:
-            load-enabled: false
+            updates-enabled: true
+            fs-cache-path: $dynamic-config-cache
+            fs-task-processor: fs-task-processor
+            defaults:
+                # Test that non-existent lines in USERVER_LOG_DYNAMIC_DEBUG
+                # do not prevent the service from starting or updating
+                # dynamic config.
+                USERVER_LOG_DYNAMIC_DEBUG:
+                    force-enabled:
+                      - garbage
+                    force-disabled: []
         dynamic-config-client:
             config-url: $config-server-url
             http-retries: 5
@@ -79,29 +112,33 @@ components_manager:
             service-name: testsuite-support
         dynamic-config-client-updater:
             config-settings: false
-            fallback-path: $config-fallback
+            first-update-fail-ok: true
             full-update-interval: 1m
-            load-only-my-values: true
-            store-enabled: true
             update-interval: 5s
 
         dns-client:
             fs-task-processor: fs-task-processor
-    coro_pool:
-        initial_size: 500
-        max_size: 1000
+
+        handler-ping:
+            path: /ping
+            method: GET
+            task_processor: main-task-processor
+            throttling_enabled: false
+            url_trailing_slash: strict-match
+
+        handler-restart:
+            path: /restart
+            method: GET
+            task_processor: main-task-processor
 
     task_processors:
         main-task-processor:
             worker_threads: 4
-            thread_name: main-worker
-
         fs-task-processor:
-            thread_name: fs-worker
             worker_threads: 2
+        monitor-task-processor:
+            thread_name: mon-worker
+            worker_threads: $monitor_worker_threads
+            worker_threads#fallback: 1
 
     default_task_processor: main-task-processor
-
-userver_experiments:
-  - handler-cancel-on-immediate-deadline-expiration
-  - handler-override-response-on-deadline

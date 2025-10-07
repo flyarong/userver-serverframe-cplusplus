@@ -15,19 +15,15 @@
 #include <userver/urabbitmq/consumer_settings.hpp>
 #include <userver/urabbitmq/typedefs.hpp>
 
-/// @page rabbitmq_driver RabbitMQ (AMQP 0-9-1) - EXPERIMENTAL
+/// @page rabbitmq_driver RabbitMQ (AMQP 0-9-1)
 ///
-/// Disclaimer: current state of the driver is highly experimental, and
-/// although APIs are not likely to change drastically, some adjustments may be
-/// made in the future.
-/// Please also keep in mind that this driver is a community-based effort and is
-/// not backed by Yandex expertise nor by Yandex-scale production usage.
+/// **Quality:** @ref QUALITY_TIERS "Golden Tier".
 ///
 /// 🐙 **userver** provides access to RabbitMQ servers via
 /// components::RabbitMQ. The uRabbitMQ driver is asynchronous, it suspends
 /// current coroutine for carrying out network I/O.
 ///
-/// @section feature Features
+/// @section rabbitmq_feature Features
 /// - Publishing messages;
 /// - Consuming messages;
 /// - Creating Exchanges, Queues and Bindings;
@@ -35,7 +31,7 @@
 /// - Connections pooling;
 /// - End-to-end logging for messages in publish->consume chain.
 ///
-/// @section info More information
+/// @section rabbitmq_info More information
 /// - For configuration see components::RabbitMQ
 /// - For cluster operations see urabbitmq::Client, urabbitmq::AdminChannel,
 ///   urabbitmq::Channel, urabbitmq::ReliableChannel
@@ -45,7 +41,8 @@
 /// ----------
 ///
 /// @htmlonly <div class="bottom-nav"> @endhtmlonly
-/// ⇦ @ref md_en_userver_grpc | @ref md_en_schemas_dynamic_configs ⇨
+/// ⇦ @ref scripts/docs/en/userver/grpc/server_middlewares.md |
+/// @ref scripts/docs/en/userver/dynamic_config.md ⇨
 /// @htmlonly </div> @endhtmlonly
 
 USERVER_NAMESPACE_BEGIN

@@ -10,6 +10,10 @@ USERVER_NAMESPACE_BEGIN
 
 namespace server::handlers {
 
+namespace impl {
+enum class StatsFormat;
+}
+
 // clang-format off
 
 /// @ingroup userver_components userver_http_handlers
@@ -21,6 +25,11 @@ namespace server::handlers {
 /// 'common-labels' option that should be a map of label name to label value.
 /// Items of the map are added to each metric.
 ///
+/// Default format can be set via 'format' option. Supported formats are: "prometheus", "prometheus-untyped", "graphite",
+///   "json", "solomon", "pretty" and "internal". For more info see the documentation for utils::statistics::ToPrometheusFormat,
+///   utils::statistics::ToPrometheusFormatUntyped, utils::statistics::ToGraphiteFormat, utils::statistics::ToJsonFormat,
+///   utils::statistics::ToSolomonFormat, utils::statistics::ToPrettyFormat.
+///
 /// ## Static configuration example:
 ///
 /// @snippet components/common_server_component_list_test.cpp  Sample handler server monitor component config
@@ -28,13 +37,8 @@ namespace server::handlers {
 /// ## Scheme
 ///
 /// Accepts a path arguments 'format', 'labels', 'path' and 'prefix':
-/// * format - "prometheus", "prometheus-untyped", "graphite",
-///   "json", "solomon", "pretty" and internal (default) format is
-///   supported. For more info see the
-///   documentation for utils::statistics::ToPrometheusFormat,
-///   utils::statistics::ToPrometheusFormatUntyped,
-///   utils::statistics::ToGraphiteFormat, utils::statistics::ToJsonFormat,
-///   utils::statistics::ToSolomonFormat, utils::statistics::ToPrettyFormat.
+/// * format - overrides default format option if it's present. Make sure that you provide
+///   at least one of two formats.
 /// * labels - filter out metrics without the provided labels. Parameter should
 ///   be a JSON dictionary in the form '{"label1":"value1", "label2":"value2"}'.
 /// * path - return metrics on for the following path
@@ -42,34 +46,34 @@ namespace server::handlers {
 
 // clang-format on
 class ServerMonitor final : public HttpHandlerBase {
- public:
-  ServerMonitor(const components::ComponentConfig& config,
-                const components::ComponentContext& component_context);
+public:
+    ServerMonitor(const components::ComponentConfig& config, const components::ComponentContext& component_context);
 
-  /// @ingroup userver_component_names
-  /// @brief The default name of server::handlers::ServerMonitor
-  static constexpr std::string_view kName = "handler-server-monitor";
+    /// @ingroup userver_component_names
+    /// @brief The default name of server::handlers::ServerMonitor
+    static constexpr std::string_view kName = "handler-server-monitor";
 
-  std::string HandleRequestThrow(const http::HttpRequest& request,
-                                 request::RequestContext&) const override;
+    std::string HandleRequestThrow(const http::HttpRequest& request, request::RequestContext&) const override;
 
-  static yaml_config::Schema GetStaticConfigSchema();
+    static yaml_config::Schema GetStaticConfigSchema();
 
- private:
-  std::string GetResponseDataForLogging(
-      const http::HttpRequest& request, request::RequestContext& context,
-      const std::string& response_data) const override;
+private:
+    std::string GetResponseDataForLogging(
+        const http::HttpRequest& request,
+        request::RequestContext& context,
+        const std::string& response_data
+    ) const override;
 
-  utils::statistics::Storage& statistics_storage_;
+    utils::statistics::Storage& statistics_storage_;
 
-  using CommonLabels = std::unordered_map<std::string, std::string>;
-  const CommonLabels common_labels_;
+    using CommonLabels = std::unordered_map<std::string, std::string>;
+    const CommonLabels common_labels_;
+    const std::optional<impl::StatsFormat> default_format_;
 };
 
 }  // namespace server::handlers
 
 template <>
-inline constexpr bool
-    components::kHasValidate<server::handlers::ServerMonitor> = true;
+inline constexpr bool components::kHasValidate<server::handlers::ServerMonitor> = true;
 
 USERVER_NAMESPACE_END

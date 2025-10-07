@@ -15,23 +15,23 @@ struct To final {};
 namespace impl {
 
 template <typename T, typename DbType>
-using HasConvert =
-    decltype(Convert(std::declval<DbType&&>(), convert::To<T>{}));
+using HasConvert = decltype(Convert(std::declval<DbType&&>(), convert::To<T>{}));
 
 template <typename T, typename DbType>
-inline constexpr bool kHasConvert = meta::kIsDetected<HasConvert, T, DbType>;
+inline constexpr bool kHasConvert = meta::IsDetected<HasConvert, T, DbType>;
 
 }  // namespace impl
 
 template <typename T, typename DbType>
 T DoConvert(DbType&& from) {
-  static_assert(
-      // TODO : better wording
-      impl::kHasConvert<T, DbType>,
-      "There is no 'T Convert(From&&, storages::mysql::convert::To<T>)' in "
-      "neither namespace of 'T' or `storages::mysql::convert`");
+    static_assert(
+        // TODO : better wording
+        impl::kHasConvert<T, DbType>,
+        "There is no 'T Convert(From&&, storages::mysql::convert::To<T>)' in "
+        "neither namespace of 'T' or `storages::mysql::convert`"
+    );
 
-  return Convert(std::forward<DbType>(from), To<T>{});
+    return Convert(std::forward<DbType>(from), To<T>{});
 }
 
 }  // namespace storages::mysql::convert

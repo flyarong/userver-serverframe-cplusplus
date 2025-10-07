@@ -2,7 +2,7 @@
 
 /// @file userver/formats/serialize/boost_optional.hpp
 /// @brief Serializers for boost::optional
-/// @ingroup userver_formats_serialize
+/// @ingroup userver_universal userver_formats_serialize
 
 #include <boost/optional.hpp>
 
@@ -16,9 +16,9 @@ namespace formats::serialize {
 
 template <typename T, typename Value>
 Value Serialize(const boost::optional<T>& value, To<Value>) {
-  if (!value) return {};
+    if (!value) return {};
 
-  return typename Value::Builder(*value).ExtractValue();
+    return typename Value::Builder(*value).ExtractValue();
 }
 
 }  // namespace formats::serialize

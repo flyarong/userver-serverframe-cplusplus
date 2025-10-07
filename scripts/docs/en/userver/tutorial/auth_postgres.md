@@ -3,7 +3,7 @@
 ## Before you start
 
 Make sure that you can compile and run core tests and read a basic example
-@ref md_en_userver_tutorial_hello_service.
+@ref scripts/docs/en/userver/tutorial/hello_service.md.
 
 
 ## Step by step guide
@@ -23,7 +23,9 @@ Creation of tokens and user registration is out of scope of this tutorial.
 
 Let's make a table to store users data:
 
-@snippet samples/postgres_auth/schemas/postgresql/auth.sql  postgresql schema
+@include samples/postgres_auth/schemas/postgresql/auth/migrations.txt
+@include samples/postgres_auth/schemas/postgresql/auth/migrations/V001__create_db.sql
+@include samples/postgres_auth/schemas/postgresql/auth/migrations/V002__add_name.sql
 
 Authorization data is rarely changed and often queried. Caching it would improve
 response times:
@@ -37,7 +39,7 @@ Cache configuration is straightforward:
 
 ### Authorization Checker
 
-To implement an authorization checker derive from 
+To implement an authorization checker derive from
 server::handlers::auth::AuthCheckerBase and override the virtual functions:
 
 @snippet samples/postgres_auth/auth_bearer.cpp  auth checker declaration
@@ -60,7 +62,7 @@ The authorization should do the following steps:
 
 @warning `CheckAuth` functions are invoked concurrently on the same instance of
   the class. In this sample the `AuthCheckerBearer` class only reads the
-  class data. @ref md_en_userver_synchronization "synchronization primitives"
+  class data. @ref scripts/docs/en/userver/synchronization.md "synchronization primitives"
   should be used if data is mutated.
 
 
@@ -119,13 +121,12 @@ make userver-samples-postgres_auth
 
 The sample could be started by running
 `make start-userver-samples-postgres_auth`. The command would invoke
-@ref md_en_userver_functional_testing "testsuite start target" that sets proper
+@ref scripts/docs/en/userver/functional_testing.md "testsuite start target" that sets proper
 paths in the configuration files, prepares and starts the DB, and starts the
 service.
 
 To start the service manually start the DB server and run
-`./samples/postgres_service/userver-samples-postgres_auth -c </path/to/static_config.yaml>`
-(do not forget to prepare the configuration files!).
+`./samples/postgres_service/userver-samples-postgres_auth -c </path/to/static_config.yaml>`.
 
 Now you can send a request to your service from another terminal:
 ```
@@ -137,7 +138,7 @@ Content-Type: text/html
 X-YaRequestId: dbc9dbaa3fc04ce8a86b27a1aa582cd6
 X-YaSpanId: aa573144f2312714
 X-YaTraceId: 4dfb9e852e07473c9d57a8eb520e7965
-Server: userver/1.0.0 (20221221124812; rv:unknown)
+Server: userver/2.0 (20221221124812; rv:unknown)
 Connection: keep-alive
 Content-Length: 28
 
@@ -150,18 +151,20 @@ Content-Type: text/html
 X-YaRequestId: 6e39f3bf27324aa3acb01a30b9653b2d
 X-YaTraceId: e5d38ab53b3f495a9b97279a731f5fde
 X-YaSpanId: e64b939c37035d88
-Server: userver/1.0.0 (20221221124812; rv:unknown)
+Server: userver/2.0 (20221221124812; rv:unknown)
 Connection: keep-alive
 Content-Length: 0
 ```
 
 
 ### Functional testing
-@ref md_en_userver_functional_testing "Functional tests" for the service could be
+@ref scripts/docs/en/userver/functional_testing.md "Functional tests" for the service could be
 implemented using the testsuite. To do that you have to:
 
 * Provide PostgreSQL schema to start the database:
-  @snippet samples/postgres_auth/schemas/postgresql/auth.sql  postgresql schema
+  @ref samples/postgres_auth/schemas/postgresql/auth/migrations.txt
+  @ref samples/postgres_auth/schemas/postgresql/auth/migrations/V001__create_db.sql
+  @ref samples/postgres_auth/schemas/postgresql/auth/migrations/V002__add_name.sql
 * Tell the testsuite to start the PostgreSQL database by adjusting the
   @ref samples/postgres_auth/tests/conftest.py
 * Prepare the DB test data @ref samples/postgres_auth/tests/static/test_data.sql
@@ -177,9 +180,10 @@ See the full example:
 * @ref samples/postgres_auth/auth_bearer.cpp
 * @ref samples/postgres_auth/postgres_service.cpp
 * @ref samples/postgres_auth/static_config.yaml
-* @ref samples/postgres_auth/dynamic_config_fallback.json
 * @ref samples/postgres_auth/CMakeLists.txt
-* @ref samples/postgres_auth/schemas/postgresql/auth.sql
+* @ref samples/postgres_auth/schemas/postgresql/auth/migrations.txt
+* @ref samples/postgres_auth/schemas/postgresql/auth/migrations/V001__create_db.sql
+* @ref samples/postgres_auth/schemas/postgresql/auth/migrations/V002__add_name.sql
 * @ref samples/postgres_auth/tests/conftest.py
 * @ref samples/postgres_auth/tests/test_postgres.py
 * @ref samples/postgres_auth/tests/static/test_data.sql
@@ -187,7 +191,7 @@ See the full example:
 ----------
 
 @htmlonly <div class="bottom-nav"> @endhtmlonly
-⇦ @ref md_en_userver_tutorial_redis_service | @ref md_en_userver_tutorial_json_to_yaml ⇨
+⇦ @ref scripts/docs/en/userver/tutorial/kafka_service.md | @ref scripts/docs/en/userver/tutorial/json_to_yaml.md ⇨
 @htmlonly </div> @endhtmlonly
 
 @example samples/postgres_auth/user_info_cache.hpp
@@ -195,9 +199,10 @@ See the full example:
 @example samples/postgres_auth/auth_bearer.cpp
 @example samples/postgres_auth/postgres_service.cpp
 @example samples/postgres_auth/static_config.yaml
-@example samples/postgres_auth/dynamic_config_fallback.json
 @example samples/postgres_auth/CMakeLists.txt
-@example samples/postgres_auth/schemas/postgresql/auth.sql
+@example samples/postgres_auth/schemas/postgresql/auth/migrations.txt
+@example samples/postgres_auth/schemas/postgresql/auth/migrations/V001__create_db.sql
+@example samples/postgres_auth/schemas/postgresql/auth/migrations/V002__add_name.sql
 @example samples/postgres_auth/tests/conftest.py
 @example samples/postgres_auth/tests/test_postgres.py
 @example samples/postgres_auth/tests/static/test_data.sql

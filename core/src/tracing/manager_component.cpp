@@ -10,37 +10,58 @@ USERVER_NAMESPACE_BEGIN
 namespace tracing {
 
 namespace {
-const TracingManagerBase& GetTracingManagerFromConfig(
-    const components::ComponentConfig& config,
-    const components::ComponentContext& context) {
-  if (config.HasMember("component-name")) {
-    auto tracing_manager_name = config["component-name"].As<std::string>();
-    if (!tracing_manager_name.empty()) {
-      return context.FindComponent<TracingManagerBase>(tracing_manager_name);
-    }
-  }
-  return kDefaultTracingManager;
-}
+
+using FlagsFormat = utils::Flags<tracing::Format>;
+
 }  // namespace
+
+const TracingManagerBase& GetTracingManagerFromConfig(
+    const GenericTracingManager& default_manager,
+    const components::ComponentConfig& config,
+    const components::ComponentContext& context
+) {
+    if (config.HasMember("component-name")) {
+        auto tracing_manager_name = config["component-name"].As<std::string>();
+        if (!tracing_manager_name.empty()) {
+            return context.FindComponent<TracingManagerBase>(tracing_manager_name);
+        }
+    }
+    return default_manager;
+}
+
+FlagsFormat Parse(const yaml_config::YamlConfig& value, formats::parse::To<FlagsFormat>) {
+    utils::Flags<tracing::Format> format = tracing::Format{};
+
+    if (!value.IsArray()) {
+        format |= tracing::FormatFromString(value.As<std::string>("opentelemetry"));
+        format |= tracing::FormatFromString(value.As<std::string>("taxi"));
+    } else {
+        for (const auto& f : value) {
+            format |= tracing::FormatFromString(f.As<std::string>());
+        }
+    }
+
+    return format;
+}
 
 TracingManagerComponentBase::TracingManagerComponentBase(
     const components::ComponentConfig& config,
-    const components::ComponentContext& context)
-    : components::LoggableComponentBase(config, context) {}
+    const components::ComponentContext& context
+)
+    : components::ComponentBase(config, context) {}
 
 DefaultTracingManagerLocator::DefaultTracingManagerLocator(
     const components::ComponentConfig& config,
-    const components::ComponentContext& context)
-    : components::LoggableComponentBase(config, context),
-      tracing_manager_(GetTracingManagerFromConfig(config, context)) {}
+    const components::ComponentContext& context
+)
+    : components::ComponentBase(config, context),
+      default_manager_(config["incoming-format"].As<FlagsFormat>(), config["new-requests-format"].As<FlagsFormat>()),
+      tracing_manager_(GetTracingManagerFromConfig(default_manager_, config, context)) {}
 
-const TracingManagerBase& DefaultTracingManagerLocator::GetTracingManager()
-    const {
-  return tracing_manager_;
-}
+const TracingManagerBase& DefaultTracingManagerLocator::GetTracingManager() const { return tracing_manager_; }
 
 yaml_config::Schema DefaultTracingManagerLocator::GetStaticConfigSchema() {
-  return yaml_config::MergeSchemas<components::LoggableComponentBase>(R"(
+    return yaml_config::MergeSchemas<components::ComponentBase>(R"(
 type: object
 description: component for finding actual tracing manager
 additionalProperties: false
@@ -48,6 +69,21 @@ properties:
     component-name:
         type: string
         description: tracing manager component's name
+    incoming-format:
+        type: array
+        description: Incoming tracing data formats
+        items: &format_items
+            type: string
+            description: tracing formats
+            enum:
+              - b3-alternative
+              - yandex
+              - taxi
+              - opentelemetry
+    new-requests-format:
+        type: array
+        description: Send tracing data in those formats
+        items: *format_items
 )");
 }
 

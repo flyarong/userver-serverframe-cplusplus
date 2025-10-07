@@ -3,6 +3,11 @@
 If your service has a server::handlers::ServerMonitor configured, then you may
 get the service statistics and metrics.
 
+To produce metrics in declarative style refer to the docs of the
+utils::statistics::MetricTag; to register your metrics writer on per component
+basis refer to the docs of utils::statistics::Writer. To test metrics refer to
+the @ref TESTSUITE_METRICS_TESTING "testsuite metrics testing".
+
 
 ## Commands
 
@@ -12,11 +17,11 @@ at server::handlers::ServerMonitor.
 The simplest way to experiment with metrics is to start a sample by running
 `make start-userver-samples-production_service` from the build directory and
 make some requests from another terminal window, for example
-`curl 'http://localhost:8086/service/monitor?format=prometheus'`.
+`curl http://localhost:8086/service/monitor?format=prometheus`.
 
 Note that the server::handlers::ServerMonitor handler lives at the separate
 `components.server.listener-monitor` address, so you have to request them using the
-`listener-monitor` credentials. See @ref md_en_userver_tutorial_production_service
+`listener-monitor` credentials. See @ref scripts/docs/en/userver/tutorial/production_service.md
 for more info on configuration and ideas on how to change the
 `/service/monitor` handle path.
 
@@ -118,6 +123,6 @@ With grpc client and server the following additional metrics appear:
 ----------
 
 @htmlonly <div class="bottom-nav"> @endhtmlonly
-⇦ @ref md_en_userver_requests_in_flight | @ref md_en_userver_memory_profile_running_service ⇨
+⇦ @ref scripts/docs/en/userver/requests_in_flight.md | @ref scripts/docs/en/userver/memory_profile_running_service.md ⇨
 @htmlonly </div> @endhtmlonly
 

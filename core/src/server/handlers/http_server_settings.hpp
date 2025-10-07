@@ -1,25 +1,21 @@
 #pragma once
 
+#include <chrono>
+#include <unordered_set>
+
 #include <userver/dynamic_config/snapshot.hpp>
-#include <userver/dynamic_config/value.hpp>
+#include <userver/server/http/http_status.hpp>
+
+#include <dynamic_config/variables/USERVER_CANCEL_HANDLE_REQUEST_BY_DEADLINE.hpp>
+#include <dynamic_config/variables/USERVER_LOG_REQUEST.hpp>
+#include <dynamic_config/variables/USERVER_LOG_REQUEST_HEADERS.hpp>
+#include <dynamic_config/variables/USERVER_LOG_REQUEST_HEADERS_WHITELIST.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
 namespace server::handlers {
 
-class HttpServerSettings final {
- public:
-  static HttpServerSettings Parse(const dynamic_config::DocsMap& docs_map);
-
-  bool need_log_request;
-  bool need_log_request_headers;
-  bool need_check_auth_in_handlers;
-  bool need_cancel_handle_request_by_deadline;
-  bool deadline_propagation_enabled;
-};
-
-inline constexpr dynamic_config::Key<HttpServerSettings::Parse>
-    kHttpServerSettings;
+using HeadersWhitelist = std::unordered_set<std::string>;
 
 }  // namespace server::handlers
 

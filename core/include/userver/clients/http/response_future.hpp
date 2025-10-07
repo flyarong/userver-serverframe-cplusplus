@@ -7,11 +7,13 @@
 #include <memory>
 #include <type_traits>
 
+#include <userver/clients/http/config.hpp>
 #include <userver/clients/http/response.hpp>
 #include <userver/compiler/select.hpp>
 #include <userver/engine/deadline.hpp>
 #include <userver/engine/future.hpp>
 #include <userver/engine/impl/context_accessor.hpp>
+#include <userver/utils/impl/source_location.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
@@ -26,34 +28,45 @@ class EasyWrapper;
 /// @brief Allows to perform a request concurrently with other work without
 /// creating an extra coroutine for waiting.
 class ResponseFuture final {
- public:
-  ResponseFuture(ResponseFuture&& other) noexcept;
-  ResponseFuture& operator=(ResponseFuture&&) noexcept;
-  ResponseFuture(const ResponseFuture&) = delete;
-  ResponseFuture& operator=(const ResponseFuture&) = delete;
-  ~ResponseFuture();
+public:
+    ResponseFuture(ResponseFuture&& other) noexcept;
+    ResponseFuture& operator=(ResponseFuture&&) noexcept;
+    ResponseFuture(const ResponseFuture&) = delete;
+    ResponseFuture& operator=(const ResponseFuture&) = delete;
+    ~ResponseFuture();
 
-  void Cancel();
+    /// @brief Cancel the request in flight
+    void Cancel();
 
-  void Detach();
+    /// @brief Keep executing the request but do not care any more about the result. It is fine to destroy this future
+    /// after Detach(), the request will continue execution.
+    void Detach();
 
-  std::future_status Wait();
+    /// @brief Stops the current task execution until the request finishes
+    /// @throws clients::http::CancelException if the current task is being cancelled
+    /// @returns std::future_status::ready or std::future_status::timeout
+    std::future_status Wait(utils::impl::SourceLocation location = utils::impl::SourceLocation::Current());
 
-  std::shared_ptr<Response> Get();
+    /// @brief Wait for the response and return it
+    std::shared_ptr<Response> Get(utils::impl::SourceLocation location = utils::impl::SourceLocation::Current());
 
-  /// @cond
-  /// Internal helper for WaitAny/WaitAll
-  engine::impl::ContextAccessor* TryGetContextAccessor() noexcept;
+    void SetCancellationPolicy(CancellationPolicy cp);
 
-  ResponseFuture(engine::Future<std::shared_ptr<Response>>&& future,
-                 std::chrono::milliseconds total_timeout,
-                 std::shared_ptr<RequestState> request);
-  /// @endcond
+    /// @cond
+    /// Internal helper for WaitAny/WaitAll
+    engine::impl::ContextAccessor* TryGetContextAccessor() noexcept;
 
- private:
-  engine::Future<std::shared_ptr<Response>> future_;
-  engine::Deadline deadline_;
-  std::shared_ptr<RequestState> request_state_;
+    ResponseFuture(engine::Future<std::shared_ptr<Response>>&& future, std::shared_ptr<RequestState> request);
+    /// @endcond
+
+private:
+    void CancelOrDetach();
+
+    engine::Future<std::shared_ptr<Response>> future_;
+    engine::Deadline deadline_;
+    std::shared_ptr<RequestState> request_state_;
+    bool was_deadline_propagated_{false};
+    CancellationPolicy cancellation_policy_;
 };
 
 }  // namespace clients::http

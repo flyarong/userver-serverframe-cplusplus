@@ -2,6 +2,7 @@
 
 /// @file userver/utils/atomic.hpp
 /// @brief Helper algorithms to work with atomics
+/// @ingroup userver_universal userver_concurrency
 
 #include <atomic>
 
@@ -18,34 +19,39 @@ namespace utils {
 /// @param atomic the variable to update
 /// @param updater a lambda that takes the old value and produces the new value
 /// @return The updated value
+/// @note Uses std::memory_order_relaxed
 template <typename T, typename Func>
 T AtomicUpdate(std::atomic<T>& atomic, Func updater) {
-  T old_value = atomic.load();
-  while (true) {
-    // make a copy to to keep old_value unchanged
-    const T new_value = updater(T{old_value});
-    if (atomic.compare_exchange_weak(old_value, new_value)) return new_value;
-  }
+    T old_value = atomic.load();
+    while (true) {
+        // make a copy to to keep old_value unchanged
+        const T new_value = updater(T{old_value});
+
+        // don't mark cache line as dirty
+        if (old_value == new_value) return old_value;
+
+        if (atomic.compare_exchange_weak(old_value, new_value)) return new_value;
+    }
 }
 
 /// @ingroup userver_concurrency
 ///
 /// @brief Concurrently safe sets `atomic` to a `value` if `value` is less
+///
+/// @note Uses std::memory_order_relaxed
 template <typename T>
 T AtomicMin(std::atomic<T>& atomic, T value) {
-  return utils::AtomicUpdate(atomic, [value](T old_value) {
-    return value < old_value ? value : old_value;
-  });
+    return utils::AtomicUpdate(atomic, [value](T old_value) { return value < old_value ? value : old_value; });
 }
 
 /// @ingroup userver_concurrency
 ///
 /// @brief Concurrently safe sets `atomic` to a `value` if `value` is greater
+///
+/// @note Uses std::memory_order_relaxed
 template <typename T>
 T AtomicMax(std::atomic<T>& atomic, T value) {
-  return utils::AtomicUpdate(atomic, [value](T old_value) {
-    return old_value < value ? value : old_value;
-  });
+    return utils::AtomicUpdate(atomic, [value](T old_value) { return old_value < value ? value : old_value; });
 }
 
 }  // namespace utils

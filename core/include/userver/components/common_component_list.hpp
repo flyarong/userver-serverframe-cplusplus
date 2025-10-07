@@ -15,12 +15,7 @@ namespace components {
 /// updates and HTTP client.
 ///
 /// The list contains:
-/// * os_signals::ProcessorComponent
-/// * components::Logging
-/// * components::Tracer
-/// * components::ManagerControllerComponent
-/// * components::StatisticsStorage
-/// * components::DynamicConfig
+/// * everything from components::MinimalComponentList
 /// * components::LoggingConfigurator
 /// * components::DumpConfigurator
 /// * components::TestsuiteSupport
@@ -29,6 +24,7 @@ namespace components {
 /// * clients::dns::Component
 /// * components::DynamicConfigClient
 /// * components::DynamicConfigClientUpdater
+/// * engine::TaskProcessorsLoadMonitor
 ComponentList CommonComponentList();
 
 }  // namespace components

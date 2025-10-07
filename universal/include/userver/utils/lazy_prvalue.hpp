@@ -10,28 +10,28 @@ USERVER_NAMESPACE_BEGIN
 
 namespace utils {
 
+/// @ingroup userver_universal
+///
 /// @brief Can be used with various emplace functions to allow in-place
 /// constructing a non-movable value using a callable.
 ///
-/// @snippet shared/src/utils/lazy_prvalue_test.cpp  LazyPrvalue sample
+/// @snippet universal/src/utils/lazy_prvalue_test.cpp  LazyPrvalue sample
 template <typename Func>
 class LazyPrvalue final {
-  static_assert(!std::is_reference_v<Func>);
+    static_assert(!std::is_reference_v<Func>);
 
- public:
-  constexpr explicit LazyPrvalue(const Func& func) : func_(func) {}
+public:
+    constexpr explicit LazyPrvalue(const Func& func) : func_(func) {}
 
-  constexpr explicit LazyPrvalue(Func&& func) : func_(std::move(func)) {}
+    constexpr explicit LazyPrvalue(Func&& func) : func_(std::move(func)) {}
 
-  LazyPrvalue(LazyPrvalue&&) = delete;
-  LazyPrvalue& operator=(LazyPrvalue&&) = delete;
+    LazyPrvalue(LazyPrvalue&&) = delete;
+    LazyPrvalue& operator=(LazyPrvalue&&) = delete;
 
-  constexpr /* implicit */ operator std::invoke_result_t<Func&&>() && {
-    return std::move(func_)();
-  }
+    constexpr /* implicit */ operator std::invoke_result_t<Func&&>() && { return std::move(func_)(); }
 
- private:
-  Func func_;
+private:
+    Func func_;
 };
 
 }  // namespace utils

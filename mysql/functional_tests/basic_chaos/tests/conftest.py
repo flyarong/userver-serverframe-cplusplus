@@ -2,7 +2,6 @@ import json
 import typing
 
 import pytest
-
 from pytest_userver import chaos
 
 from testsuite.databases.mysql import discover
@@ -10,14 +9,14 @@ from testsuite.databases.mysql import discover
 pytest_plugins = ['pytest_userver.plugins.mysql']
 
 
-@pytest.fixture(scope='session')
-def gate_settings() -> typing.Tuple[str, int]:
+@pytest.fixture(name='gate_settings', scope='session')
+def _gate_settings() -> typing.Tuple[str, int]:
     return ('localhost', 19355)
 
 
 @pytest.fixture(scope='session')
 def service_env(gate_settings) -> dict:
-    SECDIST_CONFIG = {
+    secdist_config = {
         'mysql_settings': {
             'key-value-db': {
                 'hosts': [gate_settings[0]],
@@ -29,11 +28,11 @@ def service_env(gate_settings) -> dict:
         },
     }
 
-    return {'SECDIST_CONFIG': json.dumps(SECDIST_CONFIG)}
+    return {'SECDIST_CONFIG': json.dumps(secdist_config)}
 
 
 @pytest.fixture(scope='session')
-async def _gate(loop, gate_settings, mysql_conninfo):
+async def _gate(gate_settings, mysql_conninfo):
     gate_config = chaos.GateRoute(
         name='mysql proxy',
         host_for_client=gate_settings[0],
@@ -41,14 +40,14 @@ async def _gate(loop, gate_settings, mysql_conninfo):
         host_to_server=mysql_conninfo.hostname,
         port_to_server=mysql_conninfo.port,
     )
-    async with chaos.TcpGate(gate_config, loop) as proxy:
+    async with chaos.TcpGate(gate_config) as proxy:
         yield proxy
 
 
 @pytest.fixture(name='gate')
 async def _gate_ready(service_client, _gate):
-    _gate.to_client_pass()
-    _gate.to_server_pass()
+    await _gate.to_client_pass()
+    await _gate.to_server_pass()
     _gate.start_accepting()
 
     await _gate.wait_for_connections(timeout=5.0)

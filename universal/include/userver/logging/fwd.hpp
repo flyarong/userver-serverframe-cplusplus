@@ -12,13 +12,18 @@ namespace logging {
 namespace impl {
 
 class LoggerBase;
+class TextLogger;
 
 }  // namespace impl
 
 using LoggerRef = impl::LoggerBase&;
 using LoggerPtr = std::shared_ptr<impl::LoggerBase>;
+using TextLoggerRef = impl::TextLogger&;
+using TextLoggerPtr = std::shared_ptr<impl::TextLogger>;
 
 class LogHelper;
+
+class LogExtra;
 
 }  // namespace logging
 

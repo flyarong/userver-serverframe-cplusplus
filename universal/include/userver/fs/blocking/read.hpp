@@ -2,10 +2,11 @@
 
 /// @file userver/fs/blocking/read.hpp
 /// @brief functions for synchronous (blocking) file read operations
+/// @ingroup userver_universal
 
 #include <string>
 
-#include <boost/filesystem/operations.hpp>
+#include <userver/utils/boost_filesystem_file_status.hpp>
 
 USERVER_NAMESPACE_BEGIN
 

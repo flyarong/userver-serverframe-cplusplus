@@ -2,7 +2,7 @@
 
 /// @file userver/formats/json/serialize_duration.hpp
 /// @brief Serializers for std::chrono::duration types.
-/// @ingroup userver_formats_serialize
+/// @ingroup userver_universal userver_formats_serialize
 
 #include <chrono>
 
@@ -16,17 +16,15 @@ namespace formats::serialize {
 // Declare Serialize() as static as multiple translation units might declare
 // different implementations of std::chrono::duration<> serializations.
 template <class Rep, class Period>
-static json::Value Serialize(std::chrono::duration<Rep, Period> duration,
-                             To<formats::json::Value>) {
-  return json::ValueBuilder(duration.count()).ExtractValue();
+static json::Value Serialize(std::chrono::duration<Rep, Period> duration, To<formats::json::Value>) {
+    return json::ValueBuilder(duration.count()).ExtractValue();
 }
 
 // Declare WriteToStream() as static as multiple translation units might declare
 // different implementations of std::chrono::duration<> serializations.
 template <class Rep, class Period>
-static void WriteToStream(std::chrono::duration<Rep, Period> duration,
-                          formats::json::StringBuilder& sw) {
-  WriteToStream(duration.count(), sw);
+static void WriteToStream(std::chrono::duration<Rep, Period> duration, formats::json::StringBuilder& sw) {
+    WriteToStream(duration.count(), sw);
 }
 
 }  // namespace formats::serialize

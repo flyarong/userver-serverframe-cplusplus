@@ -3,84 +3,105 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <userver/rcu/rcu_map.hpp>
-#include <userver/storages/redis/impl/base.hpp>
+#include <userver/storages/redis/base.hpp>
 
 #include <storages/redis/impl/cluster_shard.hpp>
+#include <storages/redis/impl/sentinel_impl.hpp>
 #include <storages/redis/impl/sentinel_query.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
-namespace redis {
+namespace storages::redis::impl {
 
-template <typename K, typename V>
-struct StdMutexRcuMapTraits : rcu::DefaultRcuMapTraits<K, V> {
-  using MutexType = std::mutex;
+template <typename K>
+struct StdMutexRcuMapTraits : rcu::DefaultRcuMapTraits<K> {
+    using MutexType = std::mutex;
+    using DeleterType = rcu::SyncDeleter;
 };
 
-using NodesStorage =
-    rcu::RcuMap<std::string, Redis, StdMutexRcuMapTraits<std::string, Redis>>;
+class RedisConnectionHolder;
+using NodesStorage = rcu::RcuMap<std::string, RedisConnectionHolder, StdMutexRcuMapTraits<std::string>>;
 
 class ClusterTopology {
- public:
-  ClusterTopology() = default;
-  ClusterTopology(ClusterTopology&&) = default;
-  ClusterTopology(const ClusterTopology&) = default;
-  ClusterTopology& operator=(ClusterTopology&&) = default;
-  ClusterTopology& operator=(const ClusterTopology&) = default;
+public:
+    static constexpr auto kUnknownShard = SentinelImplBase::kUnknownShard;
 
-  ClusterTopology(
-      size_t version, std::chrono::steady_clock::time_point timestamp,
-      ClusterShardHostInfos infos, Password password,
-      const std::shared_ptr<engine::ev::ThreadPool>& redis_thread_pool,
-      NodesStorage& nodes);
-  ~ClusterTopology();
+    ClusterTopology() = default;
+    ClusterTopology(ClusterTopology&&) = default;
+    ClusterTopology(const ClusterTopology&) = delete;
+    ClusterTopology& operator=(ClusterTopology&&) = default;
+    ClusterTopology& operator=(const ClusterTopology&) = delete;
 
-  size_t GetShardIndexBySlot(uint16_t slot) const {
-    return slot_to_shard_.at(slot);
-  }
+    ClusterTopology(
+        size_t version,
+        std::chrono::steady_clock::time_point timestamp,
+        ClusterShardHostInfos infos,
+        const std::shared_ptr<engine::ev::ThreadPool>& redis_thread_pool,
+        const NodesStorage& nodes
+    );
+    ~ClusterTopology();
 
-  ClusterShard GetClusterShardByIndex(uint16_t index) const {
-    return cluster_shards_.at(index);
-  }
+    size_t GetShardIndexBySlot(uint16_t slot) const { return slot_to_shard_.at(slot); }
 
-  bool IsReady(WaitConnectedMode mode) const;
+    std::optional<size_t> GetShardByHostPort(const std::string& host_port) const {
+        auto it = host_port_to_shard_.find(host_port);
+        if (it == host_port_to_shard_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
 
-  bool HasSameInfos(const ClusterShardHostInfos& infos) const;
+    const ClusterShard& GetClusterShardByIndex(size_t index) const {
+        if (index == kUnknownShard) {
+            return super_shard_;
+        }
+        if (index >= GetShardsCount()) {
+            /// Choose safe index in case of decreased shards count since command
+            /// initiated. Return "supershard" so make request to random host, then on
+            /// MOVED we will do retry to correct host.
+            return super_shard_;
+        }
+        return cluster_shards_.at(index);
+    }
 
-  const ClusterShardHostInfos& GetShardInfos() const { return infos_; }
-  size_t GetVersion() const { return version_; }
-  size_t GetShardsCount() const { return cluster_shards_.size(); }
-  std::chrono::steady_clock::time_point GetTimestamp() const {
-    return timestamp_;
-  }
+    bool IsReady(WaitConnectedMode mode) const;
+    std::string GetReadinessInfo() const;
 
-  void GetStatistics(const MetricsSettings& settings, SentinelStatistics& stats,
-                     const std::vector<std::string>& shard_names) const;
+    bool HasSameInfos(const ClusterShardHostInfos& infos) const;
 
- private:
-  class ShardReadiness {
-   public:
-    bool IsReady() const { return master_ready_ && replica_ready_; }
-    void SetMasterReady() { master_ready_ = true; }
-    void SetReplicaReady() { replica_ready_ = true; }
+    const ClusterShardHostInfos& GetShardInfos() const { return infos_; }
+    size_t GetVersion() const { return version_; }
+    size_t GetShardsCount() const {
+        UASSERT(!cluster_shards_.empty());
+        return cluster_shards_.size();
+    }
+    std::chrono::steady_clock::time_point GetTimestamp() const { return timestamp_; }
 
-   private:
-    std::atomic_bool master_ready_{false};
-    std::atomic_bool replica_ready_{false};
-  };
+    void GetStatistics(const MetricsSettings& settings, SentinelStatistics& stats) const;
 
-  ClusterShardHostInfos infos_;
-  Password password_;
-  std::array<uint16_t, kClusterHashSlots> slot_to_shard_{};
+    std::unordered_map<ServerId, size_t, ServerIdHasher>
+    GetAvailableServersWeighted(size_t shard_idx, bool with_master, const CommandControl& cc) const;
 
-  std::vector<ClusterShard> cluster_shards_;
-  size_t version_ = 0;
-  std::chrono::steady_clock::time_point timestamp_{};
+private:
+    ClusterShardHostInfos infos_;
+    std::array<uint16_t, kClusterHashSlots> slot_to_shard_{};
+
+    /// Special "Shard" containing all instances of cluster, master - is 0-shard
+    /// master.
+    ClusterShard super_shard_;
+    std::vector<ClusterShard> cluster_shards_;
+    std::unordered_map<std::string, size_t> host_port_to_shard_{};
+    size_t version_ = 0;
+    std::chrono::steady_clock::time_point timestamp_{};
 };
 
-}  // namespace redis
+const std::string& GetShardName(size_t shard_index);
+
+}  // namespace storages::redis::impl
 
 USERVER_NAMESPACE_END

@@ -1,10 +1,11 @@
-#include "middleware.hpp"
+#include <userver/ugrpc/client/middlewares/deadline_propagation/middleware.hpp>
 
-#include <ugrpc/impl/internal_tag.hpp>
 #include <userver/server/request/task_inherited_data.hpp>
 #include <userver/tracing/tags.hpp>
-#include <userver/ugrpc/client/impl/async_methods.hpp>
-#include <userver/utils/impl/userver_experiments.hpp>
+#include <userver/utils/impl/internal_tag.hpp>
+
+#include <userver/ugrpc/client/impl/call_state.hpp>
+#include <userver/ugrpc/time_utils.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
@@ -12,57 +13,55 @@ namespace ugrpc::client::middlewares::deadline_propagation {
 
 namespace {
 
-void UpdateDeadline(impl::RpcData& data) {
-  // Disable by experiment
-  if (!utils::impl::kGrpcClientDeadlinePropagationExperiment.IsEnabled()) {
-    return;
-  }
+template <class Duration>
+void AddTimeoutMsToSpan(tracing::Span& span, Duration d) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(d);
+    span.AddTag(tracing::kTimeoutMs, ms.count());
+}
 
-  // Disable by config
-  if (!data.GetConfigValues().enforce_task_deadline) {
-    return;
-  }
+void UpdateDeadline(MiddlewareCallContext& context) {
+    auto& state = context.GetState(utils::impl::InternalTag{});
 
-  auto& span = data.GetSpan();
-  auto& context = data.GetContext();
+    // Disable by config
+    if (!state.GetConfigValues().enforce_task_deadline) {
+        return;
+    }
 
-  const auto context_deadline =
-      engine::Deadline::FromTimePoint(context.deadline());
-  const engine::Deadline task_deadline =
-      server::request::GetTaskInheritedDeadline();
+    auto& client_context = context.GetClientContext();
 
-  if (!task_deadline.IsReachable() && !context_deadline.IsReachable()) {
-    return;
-  }
+    const auto context_time_left = ugrpc::TimespecToDuration(client_context.raw_deadline());
+    const engine::Deadline task_deadline = USERVER_NAMESPACE::server::request::GetTaskInheritedDeadline();
 
-  engine::Deadline result_deadline{context_deadline};
+    const auto client_deadline_reachable = (context_time_left != engine::Deadline::Duration::max());
+    if (!task_deadline.IsReachable() && !client_deadline_reachable) {
+        // both unreachable
+        return;
+    }
 
-  if (task_deadline < context_deadline) {
-    span.AddTag("deadline_updated", true);
-    data.SetDeadlinePropagated();
-    result_deadline = task_deadline;
-  }
+    auto& span = context.GetSpan();
+    if (!task_deadline.IsReachable() && client_deadline_reachable) {
+        AddTimeoutMsToSpan(span, context_time_left);
+        return;
+    }
 
-  auto result_deadline_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          result_deadline.TimeLeft());
+    UASSERT(task_deadline.IsReachable());
+    const auto task_time_left = task_deadline.TimeLeft();
 
-  context.set_deadline(result_deadline);
-  span.AddTag(tracing::kTimeoutMs, result_deadline_ms.count());
+    if (!client_deadline_reachable || task_time_left < context_time_left) {
+        span.AddTag("deadline_updated", true);
+        state.SetDeadlinePropagated();
+
+        client_context.set_deadline(ugrpc::DurationToTimespec(task_time_left));
+
+        AddTimeoutMsToSpan(span, task_time_left);
+    } else {
+        AddTimeoutMsToSpan(span, context_time_left);
+    }
 }
 
 }  // namespace
 
-void Middleware::Handle(MiddlewareCallContext& context) const {
-  UpdateDeadline(context.GetCall().GetData(ugrpc::impl::InternalTag{}));
-
-  context.Next();
-}
-
-std::shared_ptr<const MiddlewareBase> MiddlewareFactory::GetMiddleware(
-    std::string_view /*client_name*/) const {
-  return std::make_shared<Middleware>();
-}
+void Middleware::PreStartCall(MiddlewareCallContext& context) const { UpdateDeadline(context); }
 
 }  // namespace ugrpc::client::middlewares::deadline_propagation
 

@@ -1,77 +1,36 @@
 project(userver-clickhouse CXX)
 
-file(GLOB_RECURSE SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
-
-file(GLOB_RECURSE UNIT_TEST_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cpp
-)
-list(REMOVE_ITEM SOURCES ${UNIT_TEST_SOURCES})
-
-file(GLOB_RECURSE CLICKHOUSE_TEST_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/*_chtest.cpp
-)
-list(REMOVE_ITEM SOURCES ${CLICKHOUSE_TEST_SOURCES})
-list(APPEND CLICKHOUSE_TEST_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/storages/tests/utils_test.cpp
-)
-
-file(GLOB_RECURSE CH_FUNCTIONAL_TEST_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/functional_tests/*
-)
-list(REMOVE_ITEM SOURCES ${CH_FUNCTIONAL_TEST_SOURCES})
-
-add_library(${PROJECT_NAME} STATIC ${SOURCES})
-
-if (USERVER_CONAN)
-  find_package(clickhouse-cpp REQUIRED)
-  target_link_libraries(${PROJECT_NAME} PRIVATE clickhouse-cpp-lib::clickhouse-cpp-lib)
+if(USERVER_CONAN)
+    find_package(clickhouse-cpp REQUIRED)
 else()
-  include(SetupClickhouseCPP)
-  target_link_libraries(${PROJECT_NAME} PRIVATE clickhouse-cpp)
+    include(SetupClickhouseCPP)
 endif()
 
-target_link_libraries(${PROJECT_NAME}
-  PUBLIC
-    userver-core
+userver_module(
+    clickhouse
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+    LINK_LIBRARIES_PRIVATE clickhouse-cpp-lib::clickhouse-cpp-lib
+    UTEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*_test.cpp"
+    DBTEST_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*_chtest.cpp"
+        # HACK: common source between unittest and dbtest targets.
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/storages/tests/utils_test.cpp"
+    DBTEST_DATABASES clickhouse
+    DEPENDS core
 )
-target_include_directories(${PROJECT_NAME}
-  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-  PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${USERVER_THIRD_PARTY_DIRS}/clickhouse-cpp
-    ${USERVER_THIRD_PARTY_DIRS}/clickhouse-cpp/contrib
+
+target_compile_options(${PROJECT_NAME} PUBLIC "-Wno-error=pedantic")
+
+_userver_directory_install(
+    COMPONENT clickhouse
+    FILES "${USERVER_ROOT_DIR}/cmake/modules/Findclickhouse-cpp.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/userver/modules
 )
 
-if (USERVER_IS_THE_ROOT_PROJECT)
-  add_executable(${PROJECT_NAME}_unittest ${UNIT_TEST_SOURCES})
-  target_include_directories (${PROJECT_NAME}_unittest PRIVATE
-    $<TARGET_PROPERTY:${PROJECT_NAME},INCLUDE_DIRECTORIES>
-  )
-  target_link_libraries(${PROJECT_NAME}_unittest userver-utest ${PROJECT_NAME})
-  add_google_tests(${PROJECT_NAME}_unittest)
+if(USERVER_BUILD_TESTS)
+    set_tests_properties(
+        ${PROJECT_NAME}-dbtest PROPERTIES ENVIRONMENT "TESTSUITE_CLICKHOUSE_SERVER_START_TIMEOUT=120.0"
+    )
 
-  target_compile_definitions(${PROJECT_NAME}_unittest PRIVATE
-      DEFAULT_DYNAMIC_CONFIG_FILENAME="${CMAKE_SOURCE_DIR}/clickhouse/tests/dynamic_config_fallback.json"
-  )
-  
-  add_executable(${PROJECT_NAME}_chtest ${CLICKHOUSE_TEST_SOURCES})
-  target_include_directories(${PROJECT_NAME}_chtest PRIVATE
-    $<TARGET_PROPERTY:${PROJECT_NAME},INCLUDE_DIRECTORIES>
-  )
-  target_link_libraries(${PROJECT_NAME}_chtest userver-utest ${PROJECT_NAME})
-  add_test(${PROJECT_NAME}_chtest
-    env
-      ${CMAKE_BINARY_DIR}/testsuite/env
-      --databases=clickhouse
-      run --
-      ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}_chtest
-      --gtest_output=xml:${CMAKE_BINARY_DIR}/test-results/${PROJECT_NAME}_chtest.xml
-  )
-  set_tests_properties(${PROJECT_NAME}_chtest PROPERTIES ENVIRONMENT
-          "TESTSUITE_CLICKHOUSE_SERVER_START_TIMEOUT=30.0")
-
-  add_subdirectory(functional_tests)
+    add_subdirectory(functional_tests)
 endif()

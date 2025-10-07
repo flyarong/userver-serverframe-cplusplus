@@ -9,26 +9,33 @@ USERVER_NAMESPACE_BEGIN
 namespace http::headers::header_map {
 
 class Danger final {
- public:
-  std::size_t HashKey(std::string_view key) const noexcept;
-  std::size_t HashKey(const PredefinedHeader& header) const noexcept;
+public:
+    std::size_t HashKey(std::string_view key) const noexcept;
 
-  bool IsYellow() const noexcept;
-  bool IsRed() const noexcept;
+    inline std::size_t HashKey(const PredefinedHeader& header) const noexcept {
+        if (!IsRed()) {
+            return header.hash_;
+        }
 
-  void ToGreen() noexcept;
-  void ToYellow() noexcept;
-  void ToRed() noexcept;
+        return SafeHash(header.name_);
+    }
 
- private:
-  std::size_t SafeHash(std::string_view key) const noexcept;
-  static std::size_t UnsafeHash(std::string_view key) noexcept;
+    inline bool IsYellow() const noexcept { return state_ == State::kYellow; }
+    inline bool IsRed() const noexcept { return state_ == State::kRed; }
 
-  enum class State { kGreen, kYellow, kRed };
+    void ToGreen() noexcept;
+    void ToYellow() noexcept;
+    void ToRed() noexcept;
 
-  State state_{State::kGreen};
-  std::uint64_t k0_{0};
-  std::uint64_t k1_{0};
+private:
+    std::size_t SafeHash(std::string_view key) const noexcept;
+    static std::size_t UnsafeHash(std::string_view key) noexcept;
+
+    enum class State { kGreen, kYellow, kRed };
+
+    State state_{State::kGreen};
+    std::uint64_t k0_{0};
+    std::uint64_t k1_{0};
 };
 
 }  // namespace http::headers::header_map

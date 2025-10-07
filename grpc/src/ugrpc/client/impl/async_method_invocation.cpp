@@ -1,17 +1,19 @@
 #include <userver/ugrpc/client/impl/async_method_invocation.hpp>
 
+#include <userver/utils/assert.hpp>
+
 USERVER_NAMESPACE_BEGIN
 
 namespace ugrpc::client::impl {
 
-ugrpc::impl::AsyncMethodInvocation::WaitStatus Wait(
-    ugrpc::impl::AsyncMethodInvocation& invocation,
-    grpc::ClientContext& context) noexcept {
-  const auto status = invocation.Wait();
-  if (status == ugrpc::impl::AsyncMethodInvocation::WaitStatus::kCancelled)
-    context.TryCancel();
+void FinishAsyncMethodInvocation::Notify(bool ok) noexcept {
+    finish_time_ = std::chrono::steady_clock::now();
+    AsyncMethodInvocation::Notify(ok);
+}
 
-  return status;
+std::chrono::steady_clock::time_point FinishAsyncMethodInvocation::GetFinishTime() const noexcept {
+    UASSERT_MSG(finish_time_.has_value(), "GetFinishTime should be called after invocation was notified");
+    return *finish_time_;
 }
 
 }  // namespace ugrpc::client::impl

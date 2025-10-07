@@ -10,57 +10,40 @@ USERVER_NAMESPACE_BEGIN
 
 namespace storages::postgres {
 
-CommandControl Parse(const formats::json::Value& elem,
-                     formats::parse::To<CommandControl>);
+CommandControl Parse(const formats::json::Value& elem, formats::parse::To<CommandControl>);
 
-ConnectionSettings Parse(const formats::json::Value& config,
-                         formats::parse::To<ConnectionSettings>);
+ConnectionSettingsDynamic Parse(const formats::json::Value& config, formats::parse::To<ConnectionSettingsDynamic>);
 
-ConnectionSettings Parse(const yaml_config::YamlConfig& config,
-                         formats::parse::To<ConnectionSettings>);
+ConnectionSettings Parse(const yaml_config::YamlConfig& config, formats::parse::To<ConnectionSettings>);
 
-PoolSettings Parse(const formats::json::Value& config,
-                   formats::parse::To<PoolSettings>);
+PoolSettingsDynamic Parse(const formats::json::Value& config, formats::parse::To<PoolSettingsDynamic>);
 
-PoolSettings Parse(const yaml_config::YamlConfig& config,
-                   formats::parse::To<PoolSettings>);
+PoolSettings Parse(const yaml_config::YamlConfig& config, formats::parse::To<PoolSettings>);
 
-StatementMetricsSettings Parse(const formats::json::Value& config,
-                               formats::parse::To<StatementMetricsSettings>);
+TopologySettings Parse(const formats::json::Value& config, formats::parse::To<TopologySettings>);
 
-StatementMetricsSettings Parse(const yaml_config::YamlConfig& config,
-                               formats::parse::To<StatementMetricsSettings>);
+TopologySettings Parse(const yaml_config::YamlConfig& config, formats::parse::To<TopologySettings>);
 
-class Config {
- public:
-  dynamic_config::Value<CommandControl> default_command_control;
-  dynamic_config::Value<CommandControlByHandlerMap> handlers_command_control;
-  dynamic_config::Value<CommandControlByQueryMap> queries_command_control;
-  dynamic_config::ValueDict<PoolSettings> pool_settings;
-  dynamic_config::ValueDict<ConnectionSettings> connection_settings;
-  dynamic_config::ValueDict<StatementMetricsSettings>
-      statement_metrics_settings;
+StatementMetricsSettings Parse(const formats::json::Value& config, formats::parse::To<StatementMetricsSettings>);
 
-  Config(const dynamic_config::DocsMap& docs_map);
+StatementMetricsSettings Parse(const yaml_config::YamlConfig& config, formats::parse::To<StatementMetricsSettings>);
+
+ConnectionSettings::StatementLogMode
+Parse(const yaml_config::YamlConfig& config, formats::parse::To<ConnectionSettings::StatementLogMode>);
+
+struct Config final {
+    static Config Parse(const dynamic_config::DocsMap& docs_map);
+
+    CommandControl default_command_control;
+    CommandControlByHandlerMap handlers_command_control;
+    CommandControlByQueryMap queries_command_control;
+    dynamic_config::ValueDict<PoolSettingsDynamic> pool_settings;
+    dynamic_config::ValueDict<TopologySettings> topology_settings;
+    dynamic_config::ValueDict<ConnectionSettingsDynamic> connection_settings;
+    dynamic_config::ValueDict<StatementMetricsSettings> statement_metrics_settings;
 };
 
-PipelineMode ParsePipelineMode(const dynamic_config::DocsMap& docs_map);
-
-inline constexpr dynamic_config::Key<ParsePipelineMode> kPipelineModeKey;
-
-class ConnlimitConfig {
- public:
-  bool connlimit_mode_auto_enabled;
-};
-
-ConnlimitConfig ParseConnlimitConfig(const dynamic_config::DocsMap& docs_map);
-
-inline constexpr dynamic_config::Key<ParseConnlimitConfig> kConnlimitConfig;
-
-int ParseDeadlinePropagation(const dynamic_config::DocsMap& docs_map);
-
-inline constexpr dynamic_config::Key<ParseDeadlinePropagation>
-    kDeadlinePropagationVersionConfig;
+extern const dynamic_config::Key<Config> kConfig;
 
 }  // namespace storages::postgres
 

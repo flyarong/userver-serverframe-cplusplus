@@ -1,5 +1,11 @@
 #include "log_helper_impl.hpp"
 
+#include <fmt/chrono.h>
+#include <fmt/compile.h>
+#include <fmt/format.h>
+
+#include <userver/compiler/impl/constexpr.hpp>
+#include <userver/compiler/thread_local.hpp>
 #include <userver/logging/impl/logger_base.hpp>
 #include <userver/utils/assert.hpp>
 #include <userver/utils/encoding/tskv.hpp>
@@ -8,114 +14,41 @@ USERVER_NAMESPACE_BEGIN
 
 namespace logging {
 
-namespace {
+LogHelper::Impl::Impl(
+    LoggerRef logger,
+    Level level,
+    LogClass log_class,
+    const utils::impl::SourceLocation& location
+) noexcept
+    : level_(std::max(level, logger.GetLevel())),
+      logger_(logger),
+      formatter_(logger.MakeFormatter(level, log_class, location)) {}
 
-char GetSeparatorFromLogger(LoggerRef logger) {
-  switch (logger.GetFormat()) {
-    case Format::kTskv:
-    case Format::kRaw:
-      return '=';
-    case Format::kLtsv:
-      return ':';
-  }
+void LogHelper::Impl::AddText(std::string_view text) { msg_.append(text); }
 
-  UINVARIANT(false, "Invalid logging::Format enum value");
+size_t LogHelper::Impl::GetTextSize() const { return msg_.size(); }
+
+void LogHelper::Impl::AddTag(std::string_view key, const LogExtra::Value& value) { formatter_->AddTag(key, value); }
+
+void LogHelper::Impl::AddTag(std::string_view key, std::string_view value) { formatter_->AddTag(key, value); }
+
+void LogHelper::Impl::Finish() {
+    formatter_->SetText(to_string(msg_));
+
+    auto& log_item = formatter_->ExtractLoggerItem();
+    logger_.Log(level_, log_item);
 }
 
-}  // namespace
-
-LogHelper::Impl::int_type LogHelper::Impl::BufferStd::overflow(int_type c) {
-  return impl_.overflow(c);
+auto LogHelper::Impl::BufferStd::overflow(int_type c) -> int_type {
+    if (c == std::streambuf::traits_type::eof()) return c;
+    impl_.msg_.push_back(c);
+    return c;
 }
 
-std::streamsize LogHelper::Impl::BufferStd::xsputn(const char_type* s,
-                                                   std::streamsize n) {
-  return impl_.xsputn(s, n);
+std::streamsize LogHelper::Impl::BufferStd::xsputn(const char_type* s, std::streamsize n) {
+    impl_.msg_.append(std::string_view(s, n));
+    return n;
 }
-
-LogHelper::Impl::Impl(LoggerRef logger, Level level) noexcept
-    : logger_(&logger),
-      level_(level),
-      key_value_separator_(GetSeparatorFromLogger(*logger_)) {
-  static_assert(sizeof(LogHelper::Impl) < 4096,
-                "Structures with size more than 4096 would consume at least "
-                "8KB memory in allocator.");
-}
-
-std::streamsize LogHelper::Impl::xsputn(const char_type* s, std::streamsize n) {
-  switch (encode_mode_) {
-    case Encode::kNone:
-      msg_.append(s, s + n);
-      break;
-    case Encode::kValue: {
-      utils::encoding::EncodeTskv(msg_, std::string_view(s, n),
-                                  utils::encoding::EncodeTskvMode::kValue);
-      break;
-    }
-    case Encode::kKeyReplacePeriod:
-      if (!utils::encoding::ShouldKeyBeEscaped({s, static_cast<size_t>(n)})) {
-        msg_.append(s, s + n);
-      } else {
-        utils::encoding::EncodeTskv(
-            msg_, std::string_view(s, n),
-            utils::encoding::EncodeTskvMode::kKeyReplacePeriod);
-      }
-      break;
-  }
-
-  return n;
-}
-
-LogHelper::Impl::int_type LogHelper::Impl::overflow(int_type c) {
-  if (c == std::streambuf::traits_type::eof()) return c;
-  Put(c);
-  return c;
-}
-
-void LogHelper::Impl::Put(char_type c) {
-  switch (encode_mode_) {
-    case Encode::kNone:
-      msg_.push_back(c);
-      break;
-    case Encode::kValue:
-      utils::encoding::EncodeTskv(std::back_inserter(msg_),
-                                  static_cast<char>(c),
-                                  utils::encoding::EncodeTskvMode::kValue);
-      break;
-    case Encode::kKeyReplacePeriod:
-      utils::encoding::EncodeTskv(
-          std::back_inserter(msg_), static_cast<char>(c),
-          utils::encoding::EncodeTskvMode::kKeyReplacePeriod);
-      break;
-  }
-}
-
-LogHelper::Impl::LazyInitedStream& LogHelper::Impl::GetLazyInitedStream() {
-  if (!IsStreamInitialized()) {
-    lazy_stream_.emplace(*this);
-  }
-
-  return *lazy_stream_;
-}
-
-void LogHelper::Impl::LogTheMessage() const {
-  if (IsBroken()) {
-    return;
-  }
-
-  UASSERT(logger_);
-  const std::string_view message(msg_.data(), msg_.size());
-  logger_->Log(level_, message);
-}
-
-void LogHelper::Impl::MarkTextBegin() {
-  UASSERT_MSG(initial_length_ == 0, "MarkTextBegin must only be called once");
-  initial_length_ = msg_.size();
-}
-
-void LogHelper::Impl::MarkAsBroken() noexcept { logger_ = nullptr; }
-
-bool LogHelper::Impl::IsBroken() const noexcept { return !logger_; }
 
 }  // namespace logging
 

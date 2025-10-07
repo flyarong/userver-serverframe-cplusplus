@@ -14,46 +14,40 @@ namespace utils::statistics {
 namespace {
 
 bool IsForcedStatusCode(HttpCodes::Code status) noexcept {
-  return status == 200 || status == 400 || status == 401 || status == 500;
+    return status == 200 || status == 400 || status == 401 || status == 500;
 }
 
 }  // namespace
 
-HttpCodes::HttpCodes() {
-  // TODO remove in C++20 after atomics value-initialization
-  for (auto& counter : codes_) {
-    counter.store(0, std::memory_order_relaxed);
-  }
-}
+HttpCodes::HttpCodes() = default;
 
 void HttpCodes::Account(Code code) noexcept {
-  if (code < kMinHttpStatus || code >= kMaxHttpStatus) {
-    LOG_ERROR() << "Invalid HTTP code encountered: " << code
-                << ", skipping statistics accounting";
-    return;
-  }
-  codes_[code - kMinHttpStatus].fetch_add(1, std::memory_order_relaxed);
+    if (code < kMinHttpStatus || code >= kMaxHttpStatus) {
+        LOG_ERROR() << "Invalid HTTP code encountered: " << code << ", skipping statistics accounting";
+        return;
+    }
+    ++codes_[code - kMinHttpStatus];
 }
 
 HttpCodes::Snapshot::Snapshot(const HttpCodes& other) noexcept {
-  for (std::size_t i = 0; i < codes_.size(); ++i) {
-    codes_[i] = other.codes_[i].load(std::memory_order_relaxed);
-  }
+    for (std::size_t i = 0; i < codes_.size(); ++i) {
+        codes_[i] = other.codes_[i].Load();
+    }
 }
 
 void HttpCodes::Snapshot::operator+=(const Snapshot& other) {
-  for (std::size_t i = 0; i < codes_.size(); ++i) {
-    codes_[i] += other.codes_[i];
-  }
+    for (std::size_t i = 0; i < codes_.size(); ++i) {
+        codes_[i] += other.codes_[i];
+    }
 }
 
 void DumpMetric(Writer& writer, const HttpCodes::Snapshot& snapshot) {
-  for (const auto& [base_code, count] : utils::enumerate(snapshot.codes_)) {
-    if (count != 0 || IsForcedStatusCode(base_code)) {
-      const auto code = base_code + HttpCodes::kMinHttpStatus;
-      writer.ValueWithLabels(count, {"http_code", std::to_string(code)});
+    for (const auto& [base_code, count] : utils::enumerate(snapshot.codes_)) {
+        if (count || IsForcedStatusCode(base_code)) {
+            const auto code = base_code + HttpCodes::kMinHttpStatus;
+            writer.ValueWithLabels(count, {"http_code", std::to_string(code)});
+        }
     }
-  }
 }
 
 static_assert(kHasWriterSupport<HttpCodes::Snapshot>);

@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <ostream>
+#include <unordered_set>
 
 #include <fmt/format.h>
 
@@ -11,78 +12,78 @@
 
 USERVER_NAMESPACE_BEGIN
 
+namespace logging::impl::formatters {
+class Base;
+using BasePtr = std::unique_ptr<Base>;
+}  // namespace logging::impl::formatters
+
 namespace logging {
 
 inline constexpr std::size_t kInitialLogBufferSize = 1500;
+using LogBuffer = fmt::basic_memory_buffer<char, kInitialLogBufferSize>;
 
 struct LogHelper::InternalTag final {};
 
 class LogHelper::Impl final {
- public:
-  using char_type = std::streambuf::char_type;
-  using int_type = std::streambuf::int_type;
+public:
+    explicit Impl(
+        LoggerRef logger,
+        Level level,
+        LogClass log_class,
+        const utils::impl::SourceLocation& location
+    ) noexcept;
 
-  static std::unique_ptr<LogHelper::Impl> Make(LoggerRef logger, Level level);
+    void AddText(std::string_view text);
 
-  explicit Impl(LoggerRef logger, Level level) noexcept;
+    size_t GetTextSize() const;
 
-  void SetEncoding(Encode encode_mode) noexcept { encode_mode_ = encode_mode; }
-  Encode GetEncoding() const noexcept { return encode_mode_; }
+    void AddTag(std::string_view key, const LogExtra::Value& value);
 
-  auto& Message() noexcept { return msg_; }
-  std::size_t Capacity() const noexcept { return msg_.capacity(); }
+    void AddTag(std::string_view key, std::string_view value);
 
-  bool IsStreamInitialized() const noexcept { return !!lazy_stream_; }
-  std::ostream& Stream() { return GetLazyInitedStream().ostr; }
-  std::streambuf* StreamBuf() { return &GetLazyInitedStream().sbuf; }
+    void Finish();
 
-  LogExtra& GetLogExtra() { return extra_; }
+    void MarkAsBroken() {  // TODO
+    }
 
-  std::streamsize xsputn(const char_type* s, std::streamsize n);
-  int_type overflow(int_type c);
+    LogBuffer& GetBufferForRawValuePart() noexcept { return msg_; }
 
-  void Put(char_type c);
-  void PutKeyValueSeparator() { Put(key_value_separator_); }
+    bool IsStreamInitialized() const noexcept { return !!lazy_stream_; }
 
-  void LogTheMessage() const;
+    std::ostream& Stream() { return GetLazyInitedStream().ostr; }
 
-  void MarkTextBegin();
-  size_t TextSize() const { return msg_.size() - initial_length_; }
+private:
+    class BufferStd final : public std::streambuf {
+    public:
+        using char_type = std::streambuf::char_type;
+        using int_type = std::streambuf::int_type;
 
-  void MarkAsBroken() noexcept;
+        explicit BufferStd(Impl& impl) : impl_{impl} {}
 
-  bool IsBroken() const noexcept;
+    private:
+        int_type overflow(int_type c) override;
+        std::streamsize xsputn(const char_type* s, std::streamsize n) override;
 
- private:
-  class BufferStd final : public std::streambuf {
-   public:
-    explicit BufferStd(Impl& impl) : impl_{impl} {}
+        Impl& impl_;
+    };
 
-   private:
-    int_type overflow(int_type c) override;
-    std::streamsize xsputn(const char_type* s, std::streamsize n) override;
+    struct LazyInitedStream {
+        BufferStd sbuf;
+        std::ostream ostr;
 
-    Impl& impl_;
-  };
+        explicit LazyInitedStream(Impl& impl) : sbuf{impl}, ostr(&sbuf) {}
+    };
 
-  struct LazyInitedStream {
-    BufferStd sbuf;
-    std::ostream ostr;
+    LazyInitedStream& GetLazyInitedStream() {
+        if (!lazy_stream_) lazy_stream_.emplace(*this);
+        return *lazy_stream_;
+    }
 
-    explicit LazyInitedStream(Impl& impl) : sbuf{impl}, ostr(&sbuf) {}
-  };
-
-  LazyInitedStream& GetLazyInitedStream();
-
-  impl::LoggerBase* logger_;
-  const Level level_;
-  const char key_value_separator_;
-  Encode encode_mode_{Encode::kNone};
-  fmt::basic_memory_buffer<char, kInitialLogBufferSize> msg_;
-  std::optional<LazyInitedStream> lazy_stream_;
-  LogExtra extra_;
-  std::size_t initial_length_{0};
-  bool is_text_finished_{false};
+    LogBuffer msg_;
+    Level level_;
+    std::optional<LazyInitedStream> lazy_stream_;
+    LoggerRef logger_;
+    impl::formatters::BasePtr formatter_;
 };
 
 }  // namespace logging

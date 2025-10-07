@@ -2,7 +2,7 @@
 
 /// @file userver/formats/serialize/write_to_stream.hpp
 /// @brief Common WriteToStream functions for SAX serializers.
-/// @ingroup userver_formats_serialize_sax
+/// @ingroup userver_universal userver_formats_serialize_sax
 
 #include <map>
 #include <optional>
@@ -14,7 +14,15 @@
 
 #include <userver/formats/common/meta.hpp>
 
+namespace boost::uuids {
+struct uuid;
+}
+
 USERVER_NAMESPACE_BEGIN
+
+namespace utils::impl::strong_typedef {
+struct StrongTypedefTag;
+}
 
 namespace formats::serialize {
 
@@ -25,19 +33,18 @@ struct SaxStream {};
 /// Variant serialization
 template <typename... Types, typename StringBuilder>
 void WriteToStream(const std::variant<Types...>& value, StringBuilder& sw) {
-  return std::visit([&sw](const auto& item) { WriteToStream(item, sw); },
-                    value);
+    return std::visit([&sw](const auto& item) { WriteToStream(item, sw); }, value);
 }
 
 /// std::optional serialization
 template <typename T, typename StringBuilder>
 void WriteToStream(const std::optional<T>& value, StringBuilder& sw) {
-  if (!value) {
-    sw.WriteNull();
-    return;
-  }
+    if (!value) {
+        sw.WriteNull();
+        return;
+    }
 
-  WriteToStream(*value, sw);
+    WriteToStream(*value, sw);
 }
 
 namespace impl {
@@ -51,21 +58,21 @@ constexpr inline bool kIsSerializeAllowedInWriteToStream = true;
 // Array like types serialization
 template <typename T, typename StringBuilder>
 void WriteToStreamArray(const T& value, StringBuilder& sw) {
-  typename StringBuilder::ArrayGuard guard(sw);
-  for (const auto& item : value) {
-    // explicit cast for vector<bool> shenanigans
-    WriteToStream(static_cast<const meta::RangeValueType<T>&>(item), sw);
-  }
+    const typename StringBuilder::ArrayGuard guard(sw);
+    for (const auto& item : value) {
+        // explicit cast for vector<bool> shenanigans
+        WriteToStream(static_cast<const meta::RangeValueType<T>&>(item), sw);
+    }
 }
 
 // Dict like types serialization
 template <typename T, typename StringBuilder>
 void WriteToStreamDict(const T& value, StringBuilder& sw) {
-  typename StringBuilder::ObjectGuard guard(sw);
-  for (const auto& [key, value] : value) {
-    sw.Key(key);
-    WriteToStream(value, sw);
-  }
+    const typename StringBuilder::ObjectGuard guard(sw);
+    for (const auto& [key, item] : value) {
+        sw.Key(key);
+        WriteToStream(item, sw);
+    }
 }
 
 }  // namespace impl
@@ -75,29 +82,34 @@ void WriteToStreamDict(const T& value, StringBuilder& sw) {
 /// The signature of this WriteToStream must remain the less specialized one, so
 /// that it is not preferred over other functions.
 template <typename T, typename StringBuilder>
-std::enable_if_t<!std::is_arithmetic_v<T>> WriteToStream(const T& value,
-                                                         StringBuilder& sw) {
-  using Value = typename StringBuilder::Value;
+std::enable_if_t<!std::is_arithmetic_v<T> && !std::is_convertible_v<T&, utils::impl::strong_typedef::StrongTypedefTag&>>
+WriteToStream(const T& value, StringBuilder& sw) {
+    using Value = typename StringBuilder::Value;
 
-  if constexpr (meta::kIsMap<T>) {
-    impl::WriteToStreamDict(value, sw);
-  } else if constexpr (meta::kIsRange<T>) {
-    static_assert(!meta::kIsRecursiveRange<T>,
-                  "Trying to log a recursive range, which can be dangerous. "
-                  "(boost::filesystem::path?) Please implement WriteToStream "
-                  "for your type");
-    impl::WriteToStreamArray(value, sw);
-  } else if constexpr (common::impl::kHasSerialize<Value, T>) {
-    static_assert(
-        !sizeof(T) ||
-            impl::kIsSerializeAllowedInWriteToStream<T, StringBuilder>,
-        "SAX serialization falls back to Serialize call, which is not "
-        "allowed. Please implement WriteToStream for your type");
-    sw.WriteValue(Serialize(value, serialize::To<Value>{}));
-  } else {
-    static_assert(!sizeof(T),
-                  "Please implement WriteToStream or Serialize for your type");
-  }
+    if constexpr (meta::kIsMap<T>) {
+        impl::WriteToStreamDict(value, sw);
+    } else if constexpr (meta::kIsRange<T>) {
+        static_assert(
+            !std::is_same_v<T, boost::uuids::uuid>,
+            "Include <userver/formats/serialize/boost_uuid.hpp> to serialize 'boost::uuids::uuid"
+        );
+        static_assert(
+            !meta::kIsRecursiveRange<T>,
+            "Trying to log a recursive range, which can be dangerous. "
+            "(boost::filesystem::path?) Please implement WriteToStream "
+            "for your type"
+        );
+        impl::WriteToStreamArray(value, sw);
+    } else if constexpr (common::impl::kHasSerialize<Value, T>) {
+        static_assert(
+            !sizeof(T) || impl::kIsSerializeAllowedInWriteToStream<T, StringBuilder>,
+            "SAX serialization falls back to Serialize call, which is not "
+            "allowed. Please implement WriteToStream for your type"
+        );
+        sw.WriteValue(Serialize(value, serialize::To<Value>{}));
+    } else {
+        static_assert(!sizeof(T), "Please implement WriteToStream or Serialize for your type");
+    }
 }
 
 }  // namespace formats::serialize

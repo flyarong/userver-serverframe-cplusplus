@@ -1,7 +1,3 @@
-# yaml
-
-config_vars: /etc/test_core_uctl/config_vars.yaml
-
 components_manager:
     components:
 
@@ -86,7 +82,6 @@ components_manager:
             limited-logging-enable: true
             limited-logging-interval: 1s
 
-        secdist: {}
         default-secdist-provider: {}
 
         server:
@@ -113,6 +108,7 @@ components_manager:
             fs-task-processor: fs-task-processor
 
         dynamic-config:
+            updates-enabled: true
             fs-cache-path: $config-cache
             fs-task-processor: fs-task-processor
         dynamic-config-client:
@@ -122,10 +118,8 @@ components_manager:
             service-name: $service-name
         dynamic-config-client-updater:
             config-settings: false
-            fallback-path: $config-fallback
+            first-update-fail-ok: true
             full-update-interval: 1m
-            load-only-my-values: true
-            store-enabled: true
             update-interval: 5s
 
         tests-control:
@@ -137,15 +131,12 @@ components_manager:
             testpoint-url: $mockserver/testpoint
             throttling_enabled: false
         testsuite-support:
-            testsuite-periodic-dumps-enabled: $userver-dumps-periodic
-        tracer:
-            service-name: $service-name
-            tracer: native
     coro_pool:
         initial_size: $coro-pool-initial-size
         initial_size#fallback: 5000
         max_size: $coro-pool-max-size
         max_size#fallback: 50000
+
     default_task_processor: main-task-processor
 
     task_processors:

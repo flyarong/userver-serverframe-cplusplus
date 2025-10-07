@@ -9,9 +9,11 @@ USERVER_NAMESPACE_BEGIN
 
 namespace utils {
 
+/// @ingroup userver_universal
+///
 /// @brief Exception that is thrown on UINVARIANT violation
 class InvariantError : public TracefulException {
-  using TracefulException::TracefulException;
+    using TracefulException::TracefulException;
 };
 
 }  // namespace utils

@@ -41,8 +41,7 @@ async def _check_tcp_port_availability(tcp: HostPort) -> bool:
         _, writer = await asyncio.open_connection(tcp.host, tcp.port)
         writer.close()
         await writer.wait_closed()
-    except (OSError, asyncio.TimeoutError) as exc:
-        logger.debug('TCP %s:%s is not available: %s', tcp.host, tcp.port, exc)
+    except (OSError, asyncio.TimeoutError):
         return False
     return True
 
@@ -55,10 +54,7 @@ async def check_availability(checks: HealthChecks) -> bool:
     """
     assert checks.tcp
     done, pending = await asyncio.wait(
-        [
-            asyncio.Task(_check_tcp_port_availability(val))
-            for val in checks.tcp
-        ],
+        [asyncio.Task(_check_tcp_port_availability(val)) for val in checks.tcp],
         timeout=25.0,
         return_when=asyncio.ALL_COMPLETED,
     )
@@ -72,7 +68,7 @@ async def check_availability(checks: HealthChecks) -> bool:
     return not pending and all(task.result() for task in done)
 
 
-def get_health_checks_info(service_config_yaml: dict) -> HealthChecks:
+def get_health_checks_info(service_config: dict) -> HealthChecks:
     """
     Returns a health checks info that for server.listener, grpc-server.port
     and server.listener-monitor.
@@ -83,16 +79,17 @@ def get_health_checks_info(service_config_yaml: dict) -> HealthChecks:
     """
     checks = HealthChecks()
 
-    components = service_config_yaml['components_manager']['components']
+    components = service_config['components_manager']['components']
     server = components.get('server')
     if server:
-        port = int(server.get('listener-monitor', {}).get('port', 0))
-        if port:
-            checks.tcp.append(HostPort('localhost', port))
-
-        port = int(server.get('listener', {}).get('port', 0))
-        if port:
-            checks.tcp.append(HostPort('localhost', port))
+        for listener_name in ('listener-monitor', 'listener'):
+            listener_config = server.get(listener_name, {})
+            port = int(listener_config.get('port', 0))
+            if port:
+                host = listener_config.get('address', 'localhost')
+                if host == '::':
+                    host = 'localhost'
+                checks.tcp.append(HostPort(host, port))
 
     port = int(components.get('grpc-server', {}).get('port', 0))
     if port:

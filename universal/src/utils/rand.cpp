@@ -8,45 +8,38 @@ namespace utils {
 
 namespace {
 
-// 256 bits of randomness is enough for everyone
-constexpr std::size_t kRandomSeedInts = 8;
+template <typename T>
+auto& AsLvalue(T&& rvalue) noexcept {
+    return static_cast<T&>(rvalue);
+}
 
-class RandomImpl final : public RandomBase {
- public:
-  // NOLINTNEXTLINE(cert-msc51-cpp)
-  RandomImpl() {
+compiler::ThreadLocal local_random_impl = [] { return impl::RandomImpl{}; };
+
+}  // namespace
+
+namespace impl {
+
+std::seed_seq MakeSeedSeq() {
+    // 256 bits of randomness is enough for everyone
+    constexpr std::size_t kRandomSeedInts = 8;
+
     std::random_device device;
 
     std::array<std::seed_seq::result_type, kRandomSeedInts> random_chunks{};
     for (auto& random_chunk : random_chunks) {
-      random_chunk = device();
+        random_chunk = device();
     }
 
-    std::seed_seq seed(random_chunks.begin(), random_chunks.end());
-    gen_.seed(seed);
-  }
-
-  result_type operator()() override { return gen_(); }
-
- private:
-  std::mt19937 gen_;
-};
-
-}  // namespace
-
-RandomBase& DefaultRandom() {
-  thread_local RandomImpl random;
-  return random;
+    return std::seed_seq(random_chunks.begin(), random_chunks.end());
 }
 
-RandomBase& impl::DefaultRandomForHashSeed() {
-  thread_local RandomImpl random;
-  return random;
-}
+RandomImpl::RandomImpl() : gen_(AsLvalue(impl::MakeSeedSeq())) {}
 
-uint32_t Rand() {
-  return std::uniform_int_distribution<uint32_t>{0}(DefaultRandom());
-}
+compiler::ThreadLocalScope<RandomImpl> UseLocalRandomImpl() { return local_random_impl.Use(); }
+
+}  // namespace impl
+
+std::uint32_t Rand() { return WithDefaultRandom(std::uniform_int_distribution<std::uint32_t>{0}); }
 
 }  // namespace utils
 

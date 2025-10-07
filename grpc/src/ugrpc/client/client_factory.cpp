@@ -1,117 +1,67 @@
 #include <userver/ugrpc/client/client_factory.hpp>
 
-#include <optional>
-#include <stdexcept>
-
-#include <fmt/format.h>
-
-#include <userver/engine/async.hpp>
-#include <userver/logging/level_serialization.hpp>
-#include <userver/utils/trivial_map.hpp>
-#include <userver/yaml_config/yaml_config.hpp>
-
-#include <ugrpc/impl/logging.hpp>
-#include <ugrpc/impl/to_string.hpp>
-
 USERVER_NAMESPACE_BEGIN
 
 namespace ugrpc::client {
 
-namespace {
+ClientFactory::ClientFactory(
+    ClientFactorySettings&& client_factory_settings,
+    engine::TaskProcessor& channel_task_processor,
+    impl::MiddlewarePipelineCreator& middleware_pipeline_creator,
+    ugrpc::impl::CompletionQueuePoolBase& completion_queues,
+    ugrpc::impl::StatisticsStorage& statistics_storage,
+    testsuite::GrpcControl& testsuite_grpc,
+    dynamic_config::Source config_source
+)
+    : client_factory_settings_(std::move(client_factory_settings)),
+      channel_task_processor_(channel_task_processor),
+      middleware_pipeline_creator_(middleware_pipeline_creator),
+      completion_queues_(completion_queues),
+      client_statistics_storage_(statistics_storage),
+      config_source_(config_source),
+      testsuite_grpc_(testsuite_grpc) {}
 
-grpc::ChannelArguments MakeChannelArgs(
-    const yaml_config::YamlConfig& channel_args,
-    const yaml_config::YamlConfig& default_service_config) {
-  grpc::ChannelArguments args;
-  if (!channel_args.IsMissing()) {
-    for (const auto& [key, value] : Items(channel_args)) {
-      if (value.IsInt64()) {
-        args.SetInt(ugrpc::impl::ToGrpcString(key), value.As<int>());
-      } else {
-        args.SetString(ugrpc::impl::ToGrpcString(key), value.As<std::string>());
-      }
+impl::ClientInternals ClientFactory::MakeClientInternals(
+    ClientSettings&& client_settings,
+    std::optional<ugrpc::impl::StaticServiceMetadata> meta
+) {
+    UINVARIANT(!client_settings.client_name.empty(), "Client name is empty");
+    UINVARIANT(!client_settings.endpoint.empty(), "Client endpoint is empty");
+
+    ClientInfo info{
+        /*client_name=*/client_settings.client_name,
+        /*service_full_name=*/std::nullopt,
+    };
+    if (meta.has_value()) {
+        info.service_full_name.emplace(meta.value().service_full_name);
     }
-  }
 
-  if (!default_service_config.IsMissing()) {
-    args.SetServiceConfigJSON(default_service_config.As<std::string>());
-  }
-  return args;
-}
+    auto middlewares = middleware_pipeline_creator_.CreateMiddlewares(info);
 
-enum class AuthType {
-  kInsecure,
-  kSsl,
-};
+    auto channel_credentials = testsuite_grpc_.IsTlsEnabled()
+                                   ? GetClientCredentials(client_factory_settings_, client_settings.client_name)
+                                   : grpc::InsecureChannelCredentials();
 
-AuthType Parse(const yaml_config::YamlConfig& value,
-               formats::parse::To<AuthType>) {
-  constexpr utils::TrivialBiMap kMap([](auto selector) {
-    return selector()
-        .Case(AuthType::kInsecure, "insecure")
-        .Case(AuthType::kSsl, "ssl");
-  });
+    impl::ChannelFactory channel_factory{
+        channel_task_processor_, std::move(channel_credentials), client_factory_settings_.auth_type};
 
-  return utils::ParseFromValueString(value, kMap);
-}
-
-std::shared_ptr<grpc::ChannelCredentials> MakeDefaultCredentials(
-    AuthType type) {
-  switch (type) {
-    case AuthType::kInsecure:
-      return grpc::InsecureChannelCredentials();
-    case AuthType::kSsl:
-      return grpc::SslCredentials({});
-  }
-  UINVARIANT(false, "Invalid AuthType");
-}
-
-}  // namespace
-
-ClientFactoryConfig Parse(const yaml_config::YamlConfig& value,
-                          formats::parse::To<ClientFactoryConfig>) {
-  ClientFactoryConfig config;
-  config.credentials = MakeDefaultCredentials(
-      value["auth-type"].As<AuthType>(AuthType::kInsecure));
-
-  config.channel_args =
-      MakeChannelArgs(value["channel-args"], value["default-service-config"]);
-  config.native_log_level =
-      value["native-log-level"].As<logging::Level>(config.native_log_level);
-  config.channel_count =
-      value["channel-count"].As<std::size_t>(config.channel_count);
-
-  return config;
-}
-
-ClientFactory::ClientFactory(ClientFactoryConfig&& config,
-                             engine::TaskProcessor& channel_task_processor,
-                             MiddlewareFactories mws,
-                             grpc::CompletionQueue& queue,
-                             utils::statistics::Storage& statistics_storage,
-                             testsuite::GrpcControl& testsuite_grpc,
-                             dynamic_config::Source source)
-    : channel_task_processor_(channel_task_processor),
-      mws_(mws),
-      queue_(queue),
-      channel_cache_(testsuite_grpc.IsTlsEnabled()
-                         ? config.credentials
-                         : grpc::InsecureChannelCredentials(),
-                     config.channel_args, config.channel_count),
-      client_statistics_storage_(statistics_storage, "client"),
-      config_source_(source),
-      testsuite_grpc_(testsuite_grpc) {
-  ugrpc::impl::SetupNativeLogging();
-  ugrpc::impl::UpdateNativeLogLevel(config.native_log_level);
-}
-
-impl::ChannelCache::Token ClientFactory::GetChannel(
-    const std::string& endpoint) {
-  // Spawn a blocking task creating a gRPC channel
-  // This is third party code, no use of span inside it
-  return engine::AsyncNoSpan(channel_task_processor_,
-                             [&] { return channel_cache_.Get(endpoint); })
-      .Get();
+    return impl::ClientInternals{
+        std::move(client_settings.client_name),
+        std::move(client_settings.endpoint),
+        std::move(middlewares),
+        completion_queues_,
+        client_statistics_storage_,
+        config_source_,
+        testsuite_grpc_,
+        client_settings.client_qos,
+        client_factory_settings_.channel_count,
+        std::move(client_settings.dedicated_methods_config),
+        std::move(channel_factory),
+        client_factory_settings_.retry_config,
+        client_factory_settings_.channel_args,
+        client_factory_settings_.default_service_config,
+        client_factory_settings_.proxy_settings,
+    };
 }
 
 }  // namespace ugrpc::client

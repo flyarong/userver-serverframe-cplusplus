@@ -1,59 +1,62 @@
 #include <benchmark/benchmark.h>
 
 #include <userver/engine/run_standalone.hpp>
+#include <userver/logging/impl/logger_base.hpp>
 #include <userver/logging/null_logger.hpp>
-#include <userver/tracing/noop.hpp>
-#include <userver/tracing/opentracing.hpp>
+#include <userver/tracing/tracer.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
 namespace {
 
-void tracing_noop_ctr(benchmark::State& state) {
-  engine::RunStandalone([&] {
-    auto tracer = tracing::MakeNoopTracer("test_service");
+class NoopLogger : public logging::impl::TextLogger {
+public:
+    NoopLogger() noexcept : TextLogger(logging::Format::kRaw) { SetLevel(logging::Level::kInfo); }
+    void Log(logging::Level, logging::impl::formatters::LoggerItemRef) override {}
+    void Flush() override {}
+};
 
-    for (auto _ : state)
-      benchmark::DoNotOptimize(tracer->CreateSpanWithoutParent("name"));
-  });
+void TracingNoopCtr(benchmark::State& state) {
+    engine::RunStandalone([&] {
+        for ([[maybe_unused]] auto _ : state) {
+            tracing::Span tmp = tracing::Span::MakeRootSpan("name");
+            tmp.SetLogLevel(logging::Level::kNone);
+            benchmark::DoNotOptimize(tmp.GetSpanId());
+        }
+    });
 }
-BENCHMARK(tracing_noop_ctr);
+BENCHMARK(TracingNoopCtr);
 
-void tracing_happy_log(benchmark::State& state) {
-  logging::DefaultLoggerGuard guard{logging::MakeNullLogger()};
+void TracingHappyLog(benchmark::State& state) {
+    const logging::DefaultLoggerGuard guard{std::make_shared<NoopLogger>()};
 
-  engine::RunStandalone([&] {
-    // TODO Null logger ignores log level and keeps kNone, this benchmark
-    //  measures nothing. Should use TpLogger instead.
-    const logging::DefaultLoggerLevelScope level_scope{logging::Level::kInfo};
-    auto tracer = tracing::MakeNoopTracer("test_service");
-
-    for (auto _ : state)
-      benchmark::DoNotOptimize(tracer->CreateSpanWithoutParent("name"));
-  });
+    engine::RunStandalone([&] {
+        for ([[maybe_unused]] auto _ : state) {
+            const auto tmp = tracing::Span::MakeRootSpan("name");
+            benchmark::DoNotOptimize(tmp.GetSpanId());
+        }
+    });
 }
-BENCHMARK(tracing_happy_log);
+BENCHMARK(TracingHappyLog);
 
-tracing::Span GetSpanWithOpentracingHttpTags(tracing::TracerPtr tracer) {
-  auto span = tracer->CreateSpanWithoutParent("name");
-  span.AddTag("meta_code", 200);
-  span.AddTag("error", false);
-  span.AddTag("http.url", "http://example.com/example");
-  return span;
+tracing::Span GetSpanWithOpentracingHttpTags() {
+    auto span = tracing::Span::MakeRootSpan("name");
+    span.AddTag("meta_code", 200);
+    span.AddTag("error", false);
+    span.AddTag("http.url", "http://example.com/example");
+    return span;
 }
 
-void tracing_opentracing_ctr(benchmark::State& state) {
-  auto logger = logging::MakeNullLogger();
-  engine::RunStandalone([&] {
-    auto tracer = tracing::MakeNoopTracer("test_service");
-    tracing::SetOpentracingLogger(logger);
-    for (auto _ : state) {
-      benchmark::DoNotOptimize(GetSpanWithOpentracingHttpTags(tracer));
-    }
-    tracing::SetOpentracingLogger({});
-  });
+void TracingOpentracingCtr(benchmark::State& state) {
+    auto logger = logging::MakeNullLogger();
+    engine::RunStandalone([&] {
+        for ([[maybe_unused]] auto _ : state) {
+            const tracing::Span tmp = GetSpanWithOpentracingHttpTags();
+            benchmark::DoNotOptimize(tmp.GetSpanId());
+        }
+    });
 }
-BENCHMARK(tracing_opentracing_ctr);
+BENCHMARK(TracingOpentracingCtr);
 
 }  // namespace
 

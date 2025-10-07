@@ -4,61 +4,80 @@
 /// @brief @copybrief utils::statistics::MetricValue
 
 #include <cstdint>
+#include <type_traits>
 #include <variant>
 
+#include <userver/utils/statistics/histogram_view.hpp>
 #include <userver/utils/statistics/rate.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
 namespace utils::statistics {
 
-/// @brief The value of a metric. Only integer and floating-point metrics are
-/// allowed.
+/// @brief The value of a metric.
+///
+/// Cheap to copy, expected to be passed around by value.
 class MetricValue final {
- public:
-  using RawType = std::variant<std::int64_t, double, Rate>;
+public:
+    using RawType = std::variant<std::int64_t, double, Rate, HistogramView>;
 
-  MetricValue(const MetricValue&) = default;
-  MetricValue& operator=(const MetricValue&) = default;
+    /// Creates an unspecified metric value.
+    constexpr MetricValue() noexcept : value_(std::int64_t{0}) {}
 
-  bool operator==(const MetricValue& other) const noexcept {
-    return value_ == other.value_;
-  }
+    /// Constructs MetricValue for tests.
+    /// @{
+    constexpr /*implicit*/ MetricValue(std::int64_t value) noexcept : value_(value) {}
 
-  bool operator!=(const MetricValue& other) const noexcept {
-    return value_ != other.value_;
-  }
+    constexpr /*implicit*/ MetricValue(double value) noexcept : value_(value) {}
 
-  /// @brief Retrieve the value of an integer metric.
-  /// @throws std::exception on type mismatch.
-  std::int64_t AsInt() const { return std::get<std::int64_t>(value_); }
+    constexpr /*implicit*/ MetricValue(Rate value) noexcept : value_(value) {}
 
-  /// @brief Retrieve the value of a floating-point metric.
-  /// @throws std::exception on type mismatch.
-  double AsFloat() const { return std::get<double>(value_); }
+    constexpr /*implicit*/ MetricValue(HistogramView value) noexcept : value_(value) {}
+    /// @}
 
-  /// @brief Retrieve the value of a Rate metric.
-  /// @throws std::exception on type mismatch.
-  Rate AsRate() const { return std::get<Rate>(value_); }
+    // trivially copyable
+    MetricValue(const MetricValue&) = default;
+    MetricValue& operator=(const MetricValue&) = default;
 
-  /// @brief Returns whether metric is Rate metric
-  bool IsRate() const noexcept { return std::holds_alternative<Rate>(value_); }
+    friend bool operator==(const MetricValue& lhs, const MetricValue& rhs) noexcept { return lhs.value_ == rhs.value_; }
 
-  /// @brief Calls @p visitor with either a `std::int64_t` or a `double` value.
-  /// @returns Whatever @p visitor returns.
-  template <typename VisitorFunc>
-  decltype(auto) Visit(VisitorFunc visitor) const {
-    return std::visit(visitor, value_);
-  }
+    friend bool operator!=(const MetricValue& lhs, const MetricValue& rhs) noexcept { return lhs.value_ != rhs.value_; }
 
-  /// @cond
-  MetricValue() noexcept : value_(std::int64_t{0}) {}
+    /// @brief Retrieve the value of an integer metric.
+    /// @throws std::exception on type mismatch.
+    std::int64_t AsInt() const { return std::get<std::int64_t>(value_); }
 
-  explicit MetricValue(RawType value) noexcept : value_(value) {}
-  /// @endcond
+    /// @brief Retrieve the value of a floating-point metric.
+    /// @throws std::exception on type mismatch.
+    double AsFloat() const { return std::get<double>(value_); }
 
- private:
-  RawType value_;
+    /// @brief Retrieve the value of a Rate metric.
+    /// @throws std::exception on type mismatch.
+    Rate AsRate() const { return std::get<Rate>(value_); }
+
+    /// @brief Returns whether metric is Rate metric.
+    bool IsRate() const noexcept { return std::holds_alternative<Rate>(value_); }
+
+    /// @brief Retrieve the value of a HistogramView metric.
+    /// @throws std::exception on type mismatch.
+    HistogramView AsHistogram() const { return std::get<HistogramView>(value_); }
+
+    /// @brief Returns whether metric is HistogramView metric.
+    bool IsHistogram() const noexcept { return std::holds_alternative<HistogramView>(value_); }
+
+    /// @brief Calls @p visitor with either a `std::int64_t` or a `double` value.
+    /// @returns Whatever @p visitor returns.
+    template <typename VisitorFunc>
+    decltype(auto) Visit(VisitorFunc visitor) const {
+        return std::visit(visitor, value_);
+    }
+
+    /// @cond
+    explicit MetricValue(RawType value) noexcept : value_(value) {}
+    /// @endcond
+
+private:
+    RawType value_;
 };
 
 }  // namespace utils::statistics

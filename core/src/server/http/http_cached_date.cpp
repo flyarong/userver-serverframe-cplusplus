@@ -2,10 +2,11 @@
 
 #include <cstring>
 
+#include <cctz/time_zone.h>
+
+#include <userver/compiler/thread_local.hpp>
 #include <userver/utils/assert.hpp>
 #include <userver/utils/datetime/wall_coarse_clock.hpp>
-
-#include <cctz/time_zone.h>
 
 USERVER_NAMESPACE_BEGIN
 
@@ -14,42 +15,50 @@ namespace server::http {
 namespace impl {
 
 std::string MakeHttpDate(std::chrono::system_clock::time_point date) {
-  static const std::string kFormatString = "%a, %d %b %Y %H:%M:%S %Z";
-  static const auto tz = cctz::utc_time_zone();
+    static const std::string kFormatString = "%a, %d %b %Y %H:%M:%S %Z";
+    static const auto tz = cctz::utc_time_zone();
 
-  return cctz::format(kFormatString, date, tz);
+    return cctz::format(kFormatString, date, tz);
 }
 
+constexpr size_t kMaxDateHeaderLength = 128;
+
+struct LocalTimeCache final {
+    std::chrono::seconds last_second{0};
+    std::size_t last_time_string_size{};
+    char last_time_string[kMaxDateHeaderLength]{};
+};
+
 std::string_view GetCachedDate() {
-  constexpr size_t kMaxDateHeaderLength = 128;
+    static compiler::ThreadLocal local_cache = [] { return LocalTimeCache{}; };
+    auto cache = local_cache.Use();
 
-  static thread_local std::chrono::seconds::rep last_second = 0;
-  static thread_local char last_time_string[kMaxDateHeaderLength]{};
-  static thread_local std::string_view result_view{};
+    const auto now = utils::datetime::WallCoarseClock::now();
+    const auto now_seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch());
+    if (now_seconds != cache->last_second) {
+        cache->last_second = now_seconds;
 
-  const auto now = utils::datetime::WallCoarseClock::now();
-  const auto now_seconds =
-      std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch())
-          .count();
-  if (now_seconds != last_second) {
-    last_second = now_seconds;
+        const auto time_str = impl::MakeHttpDate(now);
+        // this should never fire, but is left for some convenience
+        UASSERT(time_str.size() <= kMaxDateHeaderLength);
 
-    const auto time_str = impl::MakeHttpDate(now);
-    // this should never fire, but is left for some convenience
-    UASSERT(time_str.size() <= kMaxDateHeaderLength);
+        std::memcpy(cache->last_time_string, time_str.c_str(), time_str.size());
+        cache->last_time_string_size = time_str.size();
+    }
 
-    std::memcpy(last_time_string, time_str.c_str(), time_str.size());
-    result_view = std::string_view{last_time_string, time_str.size()};
-  }
-
-  return result_view;
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-stack-address"
+#endif
+    return std::string_view{cache->last_time_string, cache->last_time_string_size};
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 }
 
 }  // namespace impl
 
-void AppendCachedDate(std::string& header) {
-  header.append(impl::GetCachedDate());
-}
+void AppendCachedDate(std::string& header) { header.append(impl::GetCachedDate()); }
 
 }  // namespace server::http
 

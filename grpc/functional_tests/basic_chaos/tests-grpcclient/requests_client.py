@@ -8,10 +8,14 @@ ALL_CASES = [
     'say_hello_indept_streams',
 ]
 
+_RETRIES = 10
+
 
 async def _request_without_case(grpc_ch, service_client, gate):
     response = await service_client.post(
-        '/hello', data='Python', headers={'Content-type': 'text/plain'},
+        '/hello',
+        data='Python',
+        headers={'Content-type': 'text/plain'},
     )
     assert response.status == 200
     assert response.content == b'Case not found'
@@ -95,7 +99,7 @@ Hello, grpc
 Hello, kernel
 Hello, developer
 Hello, core
-Hello, anonim
+Hello, anonymous
 Hello, user
 If this message has arrived then everything works
 """
@@ -114,20 +118,36 @@ _REQUESTS = {
 
 
 async def unavailable_request(service_client, gate, case):
-    response = await service_client.post(
-        f'/hello?case={case}&timeout=small',
-        data='Python',
-        headers={'Content-type': 'text/plain'},
-    )
-    assert response.status == 500
+    for _ in range(_RETRIES):
+        response = await service_client.post(
+            f'/hello?case={case}&timeout=small',
+            data='Python',
+            headers={'Content-type': 'text/plain'},
+        )
+        if response.status == 500:
+            return
+    assert False, f'The request does not fail in {_RETRIES} reties'
 
 
 def check_200_for(case):
     return _REQUESTS[case]
 
 
-async def close_connection(gate, grpc_ch):
-    gate.to_server_pass()
-    gate.to_client_pass()
+async def close_connection(gate, grpc_ch, service_client):
+    await gate.to_server_pass()
+    await gate.to_client_pass()
     await gate.sockets_close()
-    await asyncio.wait_for(grpc_ch.channel_ready(), timeout=10)
+
+    for _ in range(_RETRIES):
+        await asyncio.wait_for(grpc_ch.channel_ready(), timeout=10)
+
+        # gate.sockets_close() could be too fast and Python gRPC
+        # amy not notice that the socket is closed. We do a network interaction
+        # to force closed socket detection
+        response = await service_client.post(
+            '/hello?case=say_hello',
+            data='Python',
+            headers={'Content-type': 'text/plain'},
+        )
+        if response.status == 200:
+            return

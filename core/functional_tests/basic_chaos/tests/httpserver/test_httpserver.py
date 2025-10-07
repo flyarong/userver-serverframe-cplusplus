@@ -7,13 +7,18 @@ import typing
 
 from aiohttp import client_exceptions as exceptions
 import pytest
-
 from pytest_userver import chaos
+
+try:
+    import zstandard as zstd
+except ImportError:
+    import zstd
+
 
 from testsuite.utils import http
 
 HEADERS = {'Connection': 'keep-alive'}
-DEFAULT_TIMEOUT = 5.0
+DEFAULT_TIMEOUT = 10.0
 INCREASED_TIMEOUT = 20.0
 DEFAULT_DATA = {'hello': 'world'}
 
@@ -21,6 +26,7 @@ DATA_PARTS_MAX_SIZE = 10
 BYTES_PER_SECOND_LIMIT = 10
 
 DP_TIMEOUT_MS = 'X-YaTaxi-Client-TimeoutMs'
+DP_DEADLINE_EXPIRED = 'X-YaTaxi-Deadline-Expired'
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +39,16 @@ class ErrorType(enum.Enum):
     UNKNOWN = -1
 
 
-@pytest.fixture
-def call(modified_service_client, gate):
+@pytest.fixture(name='call')
+def _call(modified_service_client, gate):
     async def _call(
-            htype: str = 'common',
-            data: typing.Any = None,
-            timeout: float = DEFAULT_TIMEOUT,
-            testsuite_skip_prepare: bool = False,
-            headers: typing.Optional[typing.Dict[str, str]] = None,
+        htype: str = 'common',
+        data: typing.Any = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        testsuite_skip_prepare: bool = False,
+        headers: typing.Optional[typing.Dict[str, str]] = None,
+        args: typing.Dict[str, str] = {},
+        url: str = '/chaos/httpserver',
     ) -> typing.Union[http.ClientResponse, ErrorType]:
         try:
             if not data:
@@ -48,10 +56,10 @@ def call(modified_service_client, gate):
             if headers is None:
                 headers = HEADERS
             return await modified_service_client.get(
-                '/chaos/httpserver',
+                url,
                 headers=headers,
                 timeout=timeout,
-                params={'type': htype},
+                params={'type': htype, **args},
                 data=data,
                 testsuite_skip_prepare=testsuite_skip_prepare,
             )
@@ -63,18 +71,18 @@ def call(modified_service_client, gate):
             return ErrorType.RESET_BY_PEER
         except exceptions.ClientResponseError:
             return ErrorType.BAD_REQUEST
-        except Exception as ex:
-            logger.error(f'Unknown exception {ex}')
+        except Exception:
+            logger.exception('Unhandled exception')
             return ErrorType.UNKNOWN
 
     return _call
 
 
-@pytest.fixture
-def check_restore(gate, call):
+@pytest.fixture(name='check_restore')
+def _check_restore(gate, call):
     async def _check_restore():
-        gate.to_server_pass()
-        gate.to_client_pass()
+        await gate.to_server_pass()
+        await gate.to_client_pass()
         gate.start_accepting()
 
         response = await call(testsuite_skip_prepare=True)
@@ -98,14 +106,99 @@ async def test_ok(call):
     assert response.text == 'OK!'
 
 
-async def test_ok_compressed(call):
+async def test_ok_args(call):
     response = await call(
+        htype='echo-and-check-args',
+        data='abcd',
+        testsuite_skip_prepare=True,
+        args={'srv': 'mt-dev', 'lang': 'en-ru'},
+    )
+    assert response.status == 200
+    assert response.text == 'abcd'
+
+
+async def test_ok_body_args(call):
+    response = await call(
+        htype='echo-and-check-args',
+        data='lang=en-ru',
+        testsuite_skip_prepare=True,
+        args={'srv': 'mt-dev'},
+        url='/chaos/httpserver-parse-body-args',
+    )
+    assert response.status == 200
+    assert response.text == 'lang=en-ru'
+
+
+async def test_ok_compressed_gzip(call):
+    response = await call(
+        htype='echo',
         headers={'content-encoding': 'gzip'},
         data=gzip.compress('abcd'.encode()),
         testsuite_skip_prepare=True,
     )
     assert response.status == 200
-    assert response.text == 'OK!'
+    assert response.text == 'abcd'
+
+
+async def test_ok_compressed_gzip_args(call):
+    response = await call(
+        htype='echo-and-check-args',
+        headers={'content-encoding': 'gzip'},
+        data=gzip.compress('abcd'.encode()),
+        testsuite_skip_prepare=True,
+        args={'srv': 'mt-dev', 'lang': 'en-ru'},
+    )
+    assert response.status == 200
+    assert response.text == 'abcd'
+
+
+async def test_ok_compressed_gzip_body_args(call):
+    response = await call(
+        htype='echo-and-check-args',
+        headers={'content-encoding': 'gzip'},
+        data=gzip.compress('lang=en-ru'.encode()),
+        testsuite_skip_prepare=True,
+        args={'srv': 'mt-dev'},
+        url='/chaos/httpserver-parse-body-args',
+    )
+    assert response.status == 200
+    assert response.text == 'lang=en-ru'
+
+
+async def test_ok_compressed_zstd(call):
+    response = await call(
+        htype='echo',
+        headers={'content-encoding': 'zstd'},
+        data=zstd.compress('abcdefgh'.encode()),
+        testsuite_skip_prepare=True,
+    )
+    assert response.status == 200
+    assert response.text == 'abcdefgh'
+
+
+async def test_ok_compressed_zstd_args(call):
+    response = await call(
+        htype='echo-and-check-args',
+        headers={'content-encoding': 'zstd'},
+        data=zstd.compress('abcdefgh'.encode()),
+        testsuite_skip_prepare=True,
+        args={'srv': 'mt-dev', 'lang': 'en-ru'},
+    )
+    assert response.status == 200
+    assert response.text == 'abcdefgh'
+
+
+async def test_ok_compressed_zstd_body_args(call):
+    response = await call(
+        htype='echo-and-check-args',
+        headers={'content-encoding': 'zstd'},
+        data=zstd.compress('lang=en-ru'.encode()),
+        testsuite_skip_prepare=True,
+        args={'srv': 'mt-dev'},
+        url='/chaos/httpserver-parse-body-args',
+    )
+    assert response.status == 200
+    assert response.text == 'lang=en-ru'
 
 
 async def test_stop_accepting(call, gate, check_restore):
@@ -127,14 +220,14 @@ async def test_stop_accepting(call, gate, check_restore):
 async def test_close_during_request(call, gate, testpoint):
     @testpoint('testpoint_request')
     async def _hook(_data):
-        if on:
+        if should_close_sockets:
             await gate.sockets_close()
 
-    on = True
+    should_close_sockets = True
     response = await call()
     assert response == ErrorType.DISCONNECT
 
-    on = False
+    should_close_sockets = False
     response = await call()
     assert response.status == 200
     assert gate.connections_count() >= 1
@@ -144,7 +237,7 @@ async def test_close_on_data(call, gate, check_restore):
     response = await call(testsuite_skip_prepare=True)
     assert response.status == 200
 
-    gate.to_server_close_on_data()
+    await gate.to_server_close_on_data()
 
     assert gate.connections_count() >= 1
     for _ in range(gate.connections_count()):
@@ -156,13 +249,13 @@ async def test_close_on_data(call, gate, check_restore):
 
 @pytest.mark.skip(reason='corrupted data can still be valid')
 async def test_corrupted_request(call, gate, check_restore):
-    gate.to_server_corrupt_data()
+    await gate.to_server_corrupt_data()
 
     response = await call(testsuite_skip_prepare=True)
     assert isinstance(response, http.ClientResponse)
     assert response.status == 400
 
-    gate.to_server_pass()
+    await gate.to_server_pass()
 
     # Connection could be cached in testsuite client. Give it a few attempts
     # to restore
@@ -178,9 +271,10 @@ async def test_partial_request(call, gate, check_restore):
     success: bool = False
     fail: int = 0
     for bytes_count in range(1, 1000):
-        gate.to_server_limit_bytes(bytes_count)
+        await gate.to_server_limit_bytes(bytes_count)
         response = await call(
-            data={'test': 'body'}, testsuite_skip_prepare=True,
+            data={'test': 'body'},
+            testsuite_skip_prepare=True,
         )
         if response == ErrorType.DISCONNECT:
             fail = fail + 1
@@ -188,8 +282,7 @@ async def test_partial_request(call, gate, check_restore):
             success = True
             break
         else:
-            logger.error(f'Got unexpected error {response}')
-            assert False
+            pytest.fail(f'Got unexpected error {response} bytes_count={bytes_count}')
 
     assert fail >= 250
     assert success
@@ -200,11 +293,12 @@ async def test_partial_request(call, gate, check_restore):
 
 
 async def test_network_smaller_parts_sends(call, gate):
-    gate.to_server_smaller_parts(DATA_PARTS_MAX_SIZE)
+    await gate.to_server_smaller_parts(DATA_PARTS_MAX_SIZE)
 
     # With debug enabled in python send works a little bit longer
     response = await call(
-        timeout=INCREASED_TIMEOUT, testsuite_skip_prepare=True,
+        timeout=INCREASED_TIMEOUT,
+        testsuite_skip_prepare=True,
     )
     assert isinstance(response, http.ClientResponse)
     assert response.status == 200
@@ -212,6 +306,8 @@ async def test_network_smaller_parts_sends(call, gate):
 
 def _check_deadline_propagation_response(response):
     assert isinstance(response, http.ClientResponse)
+    assert DP_DEADLINE_EXPIRED in response.headers
+    # Check that the status code is taken from deadline_expired_status_code.
     assert response.status == 504
     # Check that the error format is customizable
     # by GetFormattedExternalErrorBody.
@@ -219,55 +315,51 @@ def _check_deadline_propagation_response(response):
     assert response.json()['message'] == 'Deadline expired'
 
 
-async def test_deadline_immediately_expired(call, gate, testpoint):
-    testpoint_data = []
+@pytest.fixture(name='handler_metrics')
+async def _handler_metrics(monitor_client, gate):
+    # Give metrics and logs from the previous tests some time
+    # to be written out asynchronously.
+    await asyncio.sleep(0.1)
+    return monitor_client.metrics_diff(
+        prefix='http.handler.total',
+        diff_gauge=True,
+    )
 
+
+async def test_deadline_immediately_expired(
+    call,
+    gate,
+    testpoint,
+    service_client,
+    handler_metrics,
+):
     @testpoint('testpoint_request')
-    async def _hook(data):
-        testpoint_data.append(data)
+    async def test(_data):
+        pass
 
-    gate.to_server_smaller_parts(DATA_PARTS_MAX_SIZE, sleep_per_packet=0.03)
+    # Avoid 'prepare' being accounted in the client metrics diff.
+    await service_client.update_server_state()
 
-    response = await call(
-        headers={DP_TIMEOUT_MS: '20'}, timeout=INCREASED_TIMEOUT,
+    async with handler_metrics:
+        await gate.to_server_smaller_parts(
+            DATA_PARTS_MAX_SIZE,
+            sleep_per_packet=0.03,
+        )
+        response = await call(
+            headers={DP_TIMEOUT_MS: '20'},
+            timeout=INCREASED_TIMEOUT,
+        )
+        _check_deadline_propagation_response(response)
+        assert test.times_called == 0, 'Control flow should NOT enter the handler body'
+        await gate.to_server_pass()
+
+    assert handler_metrics.value_at('rps') == 1
+    assert (
+        handler_metrics.value_at(
+            'reply-codes',
+            {'http_code': '504', 'version': '2'},
+        )
+        == 1
     )
-    _check_deadline_propagation_response(response)
-    assert not testpoint_data, 'Control flow should NOT enter the handler body'
-
-
-async def test_deadline_expired(call, testpoint, monitor_client):
-    testpoint_data = []
-
-    @testpoint('testpoint_request')
-    async def _hook(data):
-        testpoint_data.append(data)
-
-    # TODO(TAXICOMMON-6876) make service_client.reset_metric()
-    #  work for RegisterWriter metrics
-    cancelled_metric_before = await monitor_client.single_metric(
-        path='http.handler.total.cancelled-by-deadline',
-    )
-
-    response = await call(
-        htype='sleep',
-        headers={DP_TIMEOUT_MS: '150'},
-        timeout=INCREASED_TIMEOUT,
-    )
-    _check_deadline_propagation_response(response)
-    assert testpoint_data, 'Control flow SHOULD enter the handler body'
-
-    cancelled_metric_after = await monitor_client.single_metric(
-        path='http.handler.total.cancelled-by-deadline',
-    )
-    assert cancelled_metric_after.value - cancelled_metric_before.value == 1
-
-
-@pytest.mark.config(USERVER_DEADLINE_PROPAGATION_ENABLED=False)
-async def test_deadline_propagation_disabled_dynamically(call):
-    response = await call(
-        htype='sleep',
-        headers={DP_TIMEOUT_MS: '10'},
-        timeout=INCREASED_TIMEOUT,
-    )
-    assert isinstance(response, http.ClientResponse)
-    assert response.status == 200
+    assert handler_metrics.value_at('deadline-received') == 1
+    assert handler_metrics.value_at('cancelled-by-deadline') == 1

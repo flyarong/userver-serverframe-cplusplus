@@ -34,13 +34,18 @@ components_manager:
                     level: debug
                     overflow_behavior: discard
 
-        tracer:
-            service-name: mongo-service
-
         dynamic-config:
-            fs-cache-path: ''
-        dynamic-config-fallbacks:
-            fallback-path: /etc/mongo_basic_chaos/dynamic_config_fallback.json
+            updates-enabled: true
+        dynamic-config-client:
+            config-url: $config-server-url
+            http-retries: 5
+            http-timeout: 20s
+            service-name: testsuite-support
+        dynamic-config-client-updater:
+            config-settings: false
+            first-update-fail-ok: true
+            full-update-interval: 1m
+            update-interval: 5s
 
         testsuite-support:
 
@@ -58,17 +63,15 @@ components_manager:
 
         dns-client:
             fs-task-processor: fs-task-processor
-    coro_pool:
-        initial_size: 500
-        max_size: 1000
+
+        secdist:
+            load-enabled: false
+        default-secdist-provider: {}
 
     task_processors:
         main-task-processor:
             worker_threads: 4
-            thread_name: main-worker
-
         fs-task-processor:
-            thread_name: fs-worker
             worker_threads: 4
 
     default_task_processor: main-task-processor

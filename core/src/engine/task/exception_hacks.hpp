@@ -5,11 +5,13 @@ USERVER_NAMESPACE_BEGIN
 namespace engine::impl {
 
 enum class DebugInfoAction {
-  kLeaveAsIs,
-  kLockInMemory,
+    kLeaveAsIs,
+    kLockInMemory,
 };
 
-void InitPhdrCacheAndDisableDynamicLoading(DebugInfoAction debug_info);
+void InitPhdrCache();
+
+void MLockDebugInfo(DebugInfoAction debug_info);
 
 void TeardownPhdrCacheAndEnableDynamicLoading();
 

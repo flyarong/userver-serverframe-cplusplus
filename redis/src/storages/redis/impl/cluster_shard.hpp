@@ -6,65 +6,78 @@
 #include <vector>
 
 #include <userver/rcu/rcu_map.hpp>
-#include <userver/storages/redis/impl/base.hpp>
-#include <userver/storages/redis/impl/types.hpp>
-#include <userver/storages/redis/impl/wait_connected_mode.hpp>
+#include <userver/storages/redis/base.hpp>
+#include <userver/storages/redis/fwd.hpp>
+#include <userver/storages/redis/wait_connected_mode.hpp>
+#include <userver/utils/rand.hpp>
 
 #include <storages/redis/impl/command.hpp>
+#include <storages/redis/impl/redis_connection_holder.hpp>
 #include <storages/redis/impl/sentinel_query.hpp>
 
 USERVER_NAMESPACE_BEGIN
 
-namespace redis {
+namespace storages::redis::impl {
 
 class ClusterShard {
- public:
-  using RedisPtr = std::shared_ptr<redis::Redis>;
+public:
+    using RedisPtr = std::shared_ptr<Redis>;
+    using RedisConnectionPtr = std::shared_ptr<const RedisConnectionHolder>;
+    using ServersWeighted = std::unordered_map<ServerId, size_t, ServerIdHasher>;
 
-  ClusterShard(size_t shard, RedisPtr master, std::vector<RedisPtr> replicas)
-      : master_(std::move(master)),
-        replicas_(std::move(replicas)),
-        shard_(shard) {}
-  ClusterShard(const ClusterShard& other)
-      : master_(other.master_),
-        replicas_(other.replicas_),
-        current_(other.current_.load()),
-        shard_(other.shard_) {}
-  ClusterShard(ClusterShard&& other) noexcept
-      : master_(std::move(other.master_)),
-        replicas_(std::move(other.replicas_)),
-        current_(other.current_.load()),
-        shard_(other.shard_) {}
-  ClusterShard& operator=(const ClusterShard& other);
-  ClusterShard& operator=(ClusterShard&& other) noexcept;
-  bool IsReady(WaitConnectedMode mode) const;
-  bool AsyncCommand(CommandPtr command);
-  ShardStatistics GetStatistics(bool master,
-                                const MetricsSettings& settings) const;
+    ClusterShard() : current_(utils::RandRange(std::numeric_limits<size_t>::max())) {}
+    ClusterShard(size_t shard, RedisConnectionPtr master, std::vector<RedisConnectionPtr> replicas)
+        : replicas_(std::move(replicas)), master_(std::move(master)), shard_(shard) {}
+    ClusterShard(const ClusterShard& other) = delete;
+    ClusterShard(ClusterShard&& other) noexcept
+        : replicas_(std::move(other.replicas_)),
+          master_(std::move(other.master_)),
+          current_(other.current_.load()),
+          shard_(other.shard_) {}
+    ClusterShard& operator=(const ClusterShard& other) = delete;
+    ClusterShard& operator=(ClusterShard&& other) noexcept;
+    bool IsReady(WaitConnectedMode mode) const;
+    bool AsyncCommand(CommandPtr command) const;
+    void GetStatistics(bool master, const MetricsSettings& settings, ShardStatistics& stats) const;
 
- private:
-  /// Get instance id, just to check if command was already executed on this
-  /// instance. Returned number is not any index, just some id
-  static size_t ToInstanceIdx(const RedisPtr& ptr) {
-    return reinterpret_cast<size_t>(ptr.get());
-  }
+    ServersWeighted GetAvailableServersWeighted(bool with_master, const CommandControl& command_control) const;
 
-  static void GetNearestServersPing(const CommandControl& command_control,
-                                    std::vector<RedisPtr>& instances);
-  static std::vector<RedisPtr> GetAvailableServers(
-      const RedisPtr& master, const std::vector<RedisPtr>& replicas,
-      const CommandControl& command_control, bool with_masters,
-      bool with_slaves);
-  RedisPtr GetInstance(const std::vector<RedisPtr>& instances, size_t skip_idx);
-  bool IsMasterReady() const;
-  bool IsReplicaReady() const;
+private:
+    static void
+    GetNearestServersPing(const CommandControl& command_control, std::vector<RedisConnectionPtr>& instances);
+    /// Return suitable instance if it is the only suitable instance.
+    /// If there no suitable or multiple suitable instances then method return
+    /// nullptr
+    RedisPtr GetAvailableServer(const CommandControl& command_control, bool read_only) const;
+    std::vector<RedisConnectionPtr> GetAvailableServers(const CommandControl& command_control) const;
+    static RedisPtr GetInstance(
+        const std::vector<RedisConnectionPtr>& instances,
+        bool is_retry,
+        size_t start_idx,
+        size_t attempt,
+        bool is_nearest_ping_server,
+        size_t best_dc_count,
+        bool consider_ping,
+        size_t* pinstance_idx
+    );
+    std::vector<RedisConnectionPtr> MakeReadonlyWithMasters() const;
+    bool IsMasterReady() const;
+    bool IsReplicaReady() const;
 
-  RedisPtr master_;
-  std::vector<RedisPtr> replicas_;
-  std::atomic_size_t current_{0};
-  size_t shard_;
+    std::vector<RedisConnectionPtr> replicas_;
+    RedisConnectionPtr master_;
+    mutable std::atomic_size_t current_{0};
+    size_t shard_{0};
 };
 
-}  // namespace redis
+size_t GetStartIndex(
+    const CommandControl& command_control,
+    size_t attempt,
+    bool is_nearest_ping_server,
+    size_t prev_instance_idx,
+    size_t current,
+    size_t servers_count
+);
+}  // namespace storages::redis::impl
 
 USERVER_NAMESPACE_END

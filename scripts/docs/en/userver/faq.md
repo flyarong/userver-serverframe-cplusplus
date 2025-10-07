@@ -14,10 +14,23 @@ If you are trying to build the framework on Windows OS, you should use WSL
 as the platform native API
 [is not supported at the moment](https://github.com/userver-framework/userver/issues/228).
 
-Try disabling modules that you do not use, see @ref md_en_userver_tutorial_build
+Try disabling modules that you do not use, see @ref scripts/docs/en/userver/build/build.md
 for a list of supported CMake options.
 
-If you have problems with PostgreSQL build, see @ref POSTGRES_LIBS "PostgreSQL versions".
+If you have problems with PostgreSQL build, see @ref postgres_deps_versions "PostgreSQL versions".
+
+
+### SIGUSR1 terminates the service or SIGUSR1 ignored instead of rotating logs
+
+A third-party library is setting a custom signal mask for its own thread. This causes the SIGUSR1 signal to be
+delivered to that thread instead of the userver threads, which are supposed to handle log rotation.
+
+To locate the code that is interfering with signal handling, try the following approaches:
+* Search the source code of your dependencies for calls to POSIX and pthread functions that manage signals. For
+  instance, you can search using regular expressions like `.*sigmask.*` and `sig.*`.
+* Run your service under a debugger and set breakpoints on all relevant POSIX and pthread functions that manage signal
+  handling (e.g., `sigaction`, `rt_sigaction`, `signal`, `sigset`, `sighold`, `sigrelse`, `sigignore`, `sigprocmask`,
+  `pthread_sigmask`, `pthread_attr_setsigmask_np`, etc.).
 
 
 ### Service Terminated/Aborted/SIGSEGV. What to do?
@@ -84,7 +97,9 @@ This could be handy in detecting infinite loops or CPU intensive computations.
 #### Hint: Grab a stacktrace from a running service
 
 Command like `gdb -batch -ex 'thread apply all bt full' -p PID_OF_THE_SERVICE`
-should output a detailed information on each thread. Search for
+should output a detailed information on each thread. Search for `futex_wait` for hints.
+
+Also see @ref scripts/docs/en/userver/gdb_debugging.md for more info.
 
 
 #### Hint: Take a look at the metrics
@@ -97,16 +112,16 @@ grow - then the somewhere a lot of tasks was produced and the task processor
 tries hard to deal with those.
 
 If `major_pagefaults` metric grows and CPU usage of
-@ref md_en_userver_task_processors_guide "main task processors" is small,
+@ref scripts/docs/en/userver/task_processors_guide.md "main task processors" is small,
 then a blocking filesystem operation is executed in the main task processor.
 Investigate the code of your service and move those operations to
-@ref md_en_userver_task_processors_guide "fs-task-processor".
+@ref scripts/docs/en/userver/task_processors_guide.md "fs-task-processor".
 
 
 If there's no suspicious metrics grows and the CPU usage of main task
 processors is small - then probably there is a blocking system call in the code
 of your service. Locate it and replace it with a
-@ref md_en_userver_intro "proper replacement" from userver.
+@ref scripts/docs/en/userver/intro.md "proper replacement" from userver.
 
 
 ### PostgreSQL: Statement XXXX network timeout error
@@ -119,13 +134,13 @@ acquire connection + execute query <= network timeout
 ```
 
 See PostgreSQL related
-@ref md_en_schemas_dynamic_configs for more info.
+@ref scripts/docs/en/dynamic_configs/dynamic_configs.md for more info.
 
 
 ### PostgreSQL: Statement XXXX was canceled
 
 Statement was canceled by the `statement timeout`. See PostgreSQL related
-@ref md_en_schemas_dynamic_configs for more info.
+@ref scripts/docs/en/dynamic_configs/dynamic_configs.md for more info.
 
 
 ### PostgreSQL: Something is slow
@@ -143,7 +158,7 @@ network.
 Big values in the `*.busy` metrics mean that the query is slow to execute on
 the database server or that there are problems with network.
 
-See PostgreSQL metrics descriptions at @ref md_en_userver_service_monitor.
+See PostgreSQL metrics descriptions at @ref scripts/docs/en/userver/service_monitor.md.
 
 
 ### PostgreSQL: Timestamp in PostgreSQL and locally differ for multiple hours/minutes
@@ -204,5 +219,5 @@ storages::postgres::TimePointTz.
 ----------
 
 @htmlonly <div class="bottom-nav"> @endhtmlonly
-⇦ @ref md_en_userver_roadmap_and_changelog | @ref md_en_userver_tutorial_hello_service ⇨
+⇦ @ref scripts/docs/en/userver/distro_maintainers.md | @ref scripts/docs/en/userver/build/build.md ⇨
 @htmlonly </div> @endhtmlonly

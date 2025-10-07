@@ -1,16 +1,124 @@
 ## Component system
  
-Any userver-based service consists of components. A component is a basic
+A userver-based service usually consists of components. A component is a basic
 building block that encapsulates dependencies logic with configuration and
 is able to interact with other components.
+
+Each component is a singleton within a service instance, so they should only encapsulate global state,
+not per-request state. (Although *factories* for per-request objects may be appropriate.)
+Any mutable state probably needs @ref scripts/docs/en/userver/synchronization.md "synchronization".
+Built-in userver components perform synchronization internally when needed and are fully thread-safe
+unless specified otherwise.
+
+\b Example:
+
+* There is a `ClientB`, that requires initialization with some `SettingsB`
+* There is a `ClientA`, that requires initialization with some `SettingsA` and
+  a reference to `ClientB`.
+
+```cpp
+struct SettingsB{ /*...*/ };
+
+class ClientB {
+ public:
+  ClientB(SettingsB settings);
+};
+
+
+struct SettingsA{ /*...*/ };
+
+class ClientA {
+ public:
+  ClientA(ClientB& b, SettingsA settings);
+};
+```
+
+In unit tests you could create the @ref userver_clients "clients" and fill the
+settings manually in code:
+
+```cpp
+  ClientB b({.path="/opt/", .timeout=15s});
+  ClientA a(b, {.ttl=3, .skip={"some"}});
+
+  a.DoSomething();
+```
+
+When it comes to production services with tens of components and hundreds of
+settings then the configuration from code becomes cumbersome and not flexible
+enough. Knowledge about all the dependencies of clients is required; many
+clients may depend on multiple other clients; some clients may be slow to start
+and those should be initialized concurrently...
+
+Components to the rescue! A component takes care of constructing and
+configuring its own client. With components the configuration and dependency
+management problem is decomposed into small and manageable pieces:
+
+```cpp
+class ComponentA: components::ComponentBase {
+ public:
+  ComponentA(const components::ComponentConfig& config,
+             const components::ComponentContext& context)
+  : client_a_(
+      context.FindComponent<ComponentB>().GetClientB(),
+      {.ttl=config["ttl"].As<int>(), .skip=config["skip"].As<std::vector<std::string>>()}
+    )
+  {}
+
+  ClientA& GetClientA() const { return client_a_; }
+
+ private:
+  ClientA client_a_;
+};
+```
 
 Only components should know about components. Clients and other types
 constructed by components should not use components::ComponentConfig,
 components::ComponentContext, or components directly. All the components
-should inherit from components::LoggableComponentBase base class and may
+should inherit from components::ComponentBase base class and may
 override its methods.
 
 All the components are listed at the @ref userver_components API Group.
+
+## Startup context
+On component construction a components::ComponentContext is passed as a
+second parameter to the constructor of the component. That context could
+be used to get references to other components. That reference to the
+component is guaranteed to outlive the component that is being constructed.
+
+## Service lifetime stages and component hooks
+Please see docs on @ref components::ServiceLifetimeStage.
+
+## Components construction and destruction order
+utils::DaemonMain, components::Run or components::RunOnce
+start all the components from the passed components::ComponentList.
+Each component is constructed in a separate engine::Task on the default
+task processor and is initialized concurrently with other components.
+
+This is a useful feature, for example in cases
+with multiple caches that slowly read from different databases.
+
+To make component *A* depend on component *B* just call
+components::ComponentContext::FindComponent<B>() in the constructor of A.
+FindComponent() suspends the current task and continues only after the
+construction of component B is finished. Components are destroyed
+in reverse order of construction, so the component A is destroyed before
+the component B. In other words - references from FindComponent() outlive
+the component that called the FindComponent() function. If any component
+loading fails, FindComponent() wakes up and throws an
+components::ComponentsLoadCancelledException.
+
+@anchor clients_from_components_lifetime
+## References from components and lifetime of clients
+It is a common practice to have a component that returns a reference *R* from
+some function *F*. In such cases:
+* a reference *R* lives as long as the component is alive
+* a reference *R* is usually a client 
+* and it is safe to invoke member functions of reference *R* concurrently
+  unless otherwise specified.
+
+Examples:
+* components::HttpClient::GetHttpClient()
+* components::StatisticsStorage::GetStorage()
 
 ## Components static configuration
 components::ManagerControllerComponent configures the engine internals from
@@ -74,43 +182,6 @@ Supported mode:
 
 @snippet components/component_sample_test.hpp  Sample kConfigFileMode specialization
 
-## Startup context
-On component construction a components::ComponentContext is passed as a
-second parameter to the constructor of the component. That context could
-be used to get references to other components. That reference to the
-component is guaranteed to outlive the component that is being constructed.
-
-## Components construction order
-utils::DaemonMain, components::Run or components::RunOnce
-start all the components from the passed components::ComponentList.
-Each component is constructed in a separate engine::Task on the default
-task processor and is initialized concurrently with other components.
-
-This is a useful feature, for examples in cases
-with multiple caches that slowly read from different databases.
-
-To make component *A* depend on component *B* just call
-components::ComponentContext::FindComponent<B>() in the constructor of A.
-FindComponent() suspends the current task and continues only after the
-construction of component B is finished. Components are destroyed
-in reverse order of construction, so the component A is destroyed before
-the component B. In other words - references from FindComponent() outlive
-the component that called the FindComponent() function. If any component
-loading fails, FindComponent() wakes up and throws an
-components::ComponentsLoadCancelledException.
-
-## References from components
-It is a common practice to have a component that returns reference *R* from
-some function *F*. In such cases:
-* a reference *R* lives as long as the component is alive
-* a reference *R* is usually a client 
-* and it is safe to invoke member functions of reference *R* concurrently
-  unless otherwise specified.
-
-Examples:
-* components::HttpClient::GetHttpClient()
-* components::StatisticsStorage::GetStorage()
-
 ## Writing your own components
 Users of the framework may (and should) write their own components.
 
@@ -132,7 +203,7 @@ clients)
 
 ### HowTo
 Start writing your component from adding a header file with a class
-inherited from components::LoggableComponentBase.
+inherited from components::ComponentBase.
 @snippet components/component_sample_test.hpp  Sample user component header
 
 In source file write the implementation of the component:
@@ -144,7 +215,7 @@ destroyed in the reverse order of construction. In other words, references from
 If you need dynamic configs, you can get them using this approach:
 @snippet components/component_sample_test.cpp  Sample user component runtime config source
 
-@note See @ref md_en_userver_tutorial_config_service for info on how to
+@note See @ref scripts/docs/en/userver/tutorial/config_service.md for info on how to
 implement your own config server.
 
 Do not forget to register your component in components::ComponentList
@@ -156,17 +227,17 @@ Done! You've implemented your first component. Full sources:
 * @ref components/component_sample_test.cpp
 
 @note For info on writing HTTP handler components refer to
-the @ref md_en_userver_tutorial_hello_service.
+the @ref scripts/docs/en/userver/tutorial/hello_service.md.
 
 ### Testing
 Starting up the components in unit tests is quite hard. Prefer moving out
 all the functionality from the component or testing the component with the
-help of @ref md_en_userver_functional_testing "testsuite functional tests".
+help of @ref scripts/docs/en/userver/functional_testing.md "testsuite functional tests".
 
 ----------
 
 @htmlonly <div class="bottom-nav"> @endhtmlonly
-⇦ @ref md_en_userver_tutorial_auth_postgres | @ref userver_clients ⇨
+⇦ @ref scripts/docs/en/userver/tutorial/auth_postgres.md | @ref userver_clients ⇨
 @htmlonly </div> @endhtmlonly
 
 @example components/component_sample_test.hpp
